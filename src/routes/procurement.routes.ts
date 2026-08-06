@@ -1,0 +1,88 @@
+import { Router } from 'express'
+import { PurchaseOrderStatus, Role, StockMovementType } from '@prisma/client'
+import { z } from 'zod'
+import { prisma } from '../lib/prisma.js'
+import { audit } from '../lib/audit.js'
+import PDFDocument from 'pdfkit'
+import { sendMail } from '../lib/services.js'
+import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
+
+const router = Router()
+router.use(authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR))
+const tenant = (req: Express.Request) => req.user!.tenantId!
+async function purchaseOrderPdf(id: string, tenantId: string) {
+  const po = await prisma.purchaseOrder.findFirst({ where: { id, tenantId } })
+  if (!po) return null
+  const [supplier, lines] = await Promise.all([prisma.supplier.findUnique({ where: { id: po.supplierId } }), prisma.purchaseOrderLine.findMany({ where: { purchaseOrderId: po.id, tenantId } })])
+  return new Promise<{ buffer: Buffer; po: typeof po; supplier: typeof supplier }>((resolve) => {
+    const doc = new PDFDocument({ margin: 48 }), chunks: Buffer[] = []
+    doc.on('data', (chunk) => chunks.push(chunk)); doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), po, supplier }))
+    doc.fontSize(22).text('TradeFlow Purchase Order').moveDown().fontSize(12).text(`PO: ${po.code}`).text(`Supplier: ${supplier?.name ?? po.supplierId}`).text(`Status: ${po.status}`).moveDown()
+    lines.forEach((line) => doc.text(`${line.productId}  qty: ${line.orderedQty}  unit cost: ${line.unitCost}`))
+    doc.moveDown().text(`Total: ${lines.reduce((sum, line) => sum + line.orderedQty * Number(line.unitCost), 0).toLocaleString()} MNT`); doc.end()
+  })
+}
+
+router.get('/suppliers', async (req, res) => {
+  const links = await prisma.supplierRelationship.findMany({ where: { tenantId: tenant(req), active: true } })
+  const suppliers = await prisma.supplier.findMany({ where: { id: { in: links.map((link) => link.supplierId) } } })
+  res.json(suppliers.map((supplier) => ({ ...supplier, relationship: links.find((link) => link.supplierId === supplier.id) })))
+})
+router.post('/suppliers', async (req, res) => {
+  const input = z.object({ registrationNo: z.string().min(5), name: z.string().min(2), phone: z.string().optional(), email: z.email().optional(), address: z.string().optional(), category: z.string().optional(), paymentTerms: z.string().default('PREPAID'), creditDays: z.number().int().nonnegative().default(0) }).parse(req.body)
+  const supplier = await prisma.supplier.upsert({ where: { registrationNo: input.registrationNo }, update: { name: input.name, phone: input.phone, email: input.email, address: input.address, category: input.category }, create: { registrationNo: input.registrationNo, name: input.name, phone: input.phone, email: input.email, address: input.address, category: input.category } })
+  await prisma.supplierRelationship.upsert({ where: { tenantId_supplierId: { tenantId: tenant(req), supplierId: supplier.id } }, update: { paymentTerms: input.paymentTerms, creditDays: input.creditDays, active: true }, create: { tenantId: tenant(req), supplierId: supplier.id, paymentTerms: input.paymentTerms, creditDays: input.creditDays } })
+  await audit(req, 'CREATE', 'Supplier', supplier.id, undefined, supplier)
+  res.status(201).json(supplier)
+})
+router.get('/purchase-orders', async (req, res) => {
+  const rows = await prisma.purchaseOrder.findMany({ where: { tenantId: tenant(req) }, orderBy: { createdAt: 'desc' } })
+  const lines = await prisma.purchaseOrderLine.findMany({ where: { tenantId: tenant(req), purchaseOrderId: { in: rows.map((row) => row.id) } } })
+  res.json(rows.map((row) => ({ ...row, lines: lines.filter((line) => line.purchaseOrderId === row.id) })))
+})
+router.post('/purchase-orders', async (req, res) => {
+  const input = z.object({ supplierId: z.string(), warehouseId: z.string(), expectedAt: z.coerce.date().optional(), notes: z.string().optional(), lines: z.array(z.object({ productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().positive(), unitCost: z.number().positive() })).min(1) }).parse(req.body)
+  const tenantId = tenant(req)
+  const row = await prisma.$transaction(async (tx) => {
+    const [relationship, warehouse] = await Promise.all([tx.supplierRelationship.findUnique({ where: { tenantId_supplierId: { tenantId, supplierId: input.supplierId } } }), tx.warehouse.findFirst({ where: { id: input.warehouseId, tenantId } })])
+    if (!relationship || !warehouse) throw Object.assign(new Error('Нийлүүлэгч эсвэл агуулах олдсонгүй.'), { status: 404 })
+    const po = await tx.purchaseOrder.create({ data: { tenantId, code: `PO-${Date.now()}`, supplierId: input.supplierId, warehouseId: input.warehouseId, expectedAt: input.expectedAt, notes: input.notes, createdBy: req.user!.id } })
+    await tx.purchaseOrderLine.createMany({ data: input.lines.map((line) => ({ tenantId, purchaseOrderId: po.id, productId: line.productId, variantId: line.variantId, orderedQty: line.quantity, unitCost: line.unitCost })) })
+    return po
+  })
+  await audit(req, 'CREATE', 'PurchaseOrder', row.id, undefined, row)
+  res.status(201).json(row)
+})
+router.post('/purchase-orders/:id/receive', async (req, res) => {
+  const input = z.object({ lines: z.array(z.object({ lineId: z.string(), quantity: z.number().int().positive(), batchNumber: z.string().optional(), expiresAt: z.coerce.date().optional(), damaged: z.number().int().nonnegative().default(0) })).min(1) }).parse(req.body)
+  const tenantId = tenant(req)
+  const result = await prisma.$transaction(async (tx) => {
+    const po = await tx.purchaseOrder.findFirst({ where: { id: req.params.id, tenantId } })
+    if (!po || po.status === PurchaseOrderStatus.CLOSED || po.status === PurchaseOrderStatus.CANCELLED) throw Object.assign(new Error('PO хүлээн авах боломжгүй.'), { status: 409 })
+    for (const received of input.lines) {
+      const line = await tx.purchaseOrderLine.findFirst({ where: { id: received.lineId, purchaseOrderId: po.id, tenantId } })
+      if (!line || line.receivedQty + received.quantity > line.orderedQty) throw Object.assign(new Error('Хүлээн авалтын тоо PO-оос хэтэрсэн.'), { status: 409 })
+      const accepted = received.quantity - received.damaged
+      await tx.purchaseOrderLine.update({ where: { id: line.id }, data: { receivedQty: { increment: received.quantity } } })
+      const balance = await tx.inventoryBalance.upsert({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '' } }, create: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '', onHand: accepted }, update: { onHand: { increment: accepted } } })
+      await tx.stockMovement.create({ data: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, type: StockMovementType.RECEIPT, quantity: accepted, unitCost: line.unitCost, reference: po.code, createdBy: req.user!.id } })
+      if (received.batchNumber) await tx.stockBatch.upsert({ where: { tenantId_warehouseId_productId_batchNumber: { tenantId, warehouseId: po.warehouseId, productId: line.productId, batchNumber: received.batchNumber } }, create: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, batchNumber: received.batchNumber, expiresAt: received.expiresAt, quantity: accepted }, update: { quantity: { increment: accepted }, expiresAt: received.expiresAt } })
+      const product = await tx.product.findFirstOrThrow({ where: { id: line.productId, tenantId } })
+      const previousQty = Math.max(0, balance.onHand - accepted)
+      const weightedCost = previousQty + accepted > 0 ? (Number(product.costPrice) * previousQty + Number(line.unitCost) * accepted) / (previousQty + accepted) : Number(line.unitCost)
+      await tx.product.update({ where: { id: product.id }, data: { costPrice: weightedCost, stock: { increment: accepted } } })
+    }
+    const allLines = await tx.purchaseOrderLine.findMany({ where: { purchaseOrderId: po.id, tenantId } })
+    const receiptTotal = input.lines.reduce((sum, received) => { const line = allLines.find((row) => row.id === received.lineId); return sum + (line ? received.quantity * Number(line.unitCost) : 0) }, 0)
+    if (receiptTotal > 0) await tx.supplierPayable.create({ data: { tenantId, supplierId: po.supplierId, purchaseOrderId: po.id, amount: receiptTotal, dueDate: new Date(Date.now() + 30 * 86400000) } })
+    const complete = allLines.every((line) => line.receivedQty >= line.orderedQty)
+    return tx.purchaseOrder.update({ where: { id: po.id }, data: { status: complete ? PurchaseOrderStatus.RECEIVED : PurchaseOrderStatus.PARTIALLY_RECEIVED } })
+  })
+  await audit(req, 'RECEIVE', 'PurchaseOrder', result.id, undefined, result)
+  res.json(result)
+})
+router.get('/purchase-orders/:id/pdf', async (req, res) => { const result = await purchaseOrderPdf(String(req.params.id), tenant(req)); if (!result) return res.status(404).json({ message: 'PO олдсонгүй.' }); res.type('application/pdf').attachment(`${result.po.code}.pdf`).send(result.buffer) })
+router.post('/purchase-orders/:id/email', async (req, res) => { const result = await purchaseOrderPdf(String(req.params.id), tenant(req)); if (!result?.supplier?.email) return res.status(404).json({ message: 'Нийлүүлэгчийн имэйл олдсонгүй.' }); await sendMail(result.supplier.email, `${result.po.code} худалдан авалтын захиалга`, '<p>Хавсралтаар худалдан авалтын захиалгыг илгээлээ.</p>', [{ filename: `${result.po.code}.pdf`, content: result.buffer, contentType: 'application/pdf' }]); res.json({ message: 'PO имэйлээр илгээгдлээ.' }) })
+router.get('/payables', async (req, res) => res.json(await prisma.supplierPayable.findMany({ where: { tenantId: tenant(req) }, orderBy: { createdAt: 'desc' } })))
+router.post('/payables/:id/pay', async (req, res) => { const { amount } = z.object({ amount: z.number().positive() }).parse(req.body); const current = await prisma.supplierPayable.findFirst({ where: { id: String(req.params.id), tenantId: tenant(req) } }); if (!current || Number(current.paidAmount) + amount > Number(current.amount)) return res.status(409).json({ message: 'Төлбөрийн дүн буруу.' }); const row = await prisma.supplierPayable.update({ where: { id: current.id }, data: { paidAmount: { increment: amount }, status: Number(current.paidAmount) + amount >= Number(current.amount) ? 'PAID' : 'PARTIAL' } }); res.json(row) })
+export default router
