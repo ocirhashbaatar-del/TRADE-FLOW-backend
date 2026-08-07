@@ -24,6 +24,8 @@ export async function releaseExpiredReservations(tenantId?: string) {
       },
     })
     for (const row of rows) {
+      const order = await tx.order.findFirst({ where: { id: row.orderId, tenantId: row.tenantId }, select: { status: true } })
+      if (order?.status !== 'PENDING') continue
       const changed = await tx.stockReservation.updateMany({
         where: { id: row.id, status: ReservationStatus.ACTIVE },
         data: { status: ReservationStatus.EXPIRED },

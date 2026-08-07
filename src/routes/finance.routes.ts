@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
+import { postPayment } from '../lib/payment-posting.js'
 
 const router = Router()
 router.use(authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.ACCOUNTANT))
@@ -11,9 +12,10 @@ const tid = (req: Express.Request) => req.user!.tenantId!
 
 router.get('/invoices', async (req, res) => {
   const invoices = await prisma.invoice.findMany({ where: { tenantId: tid(req) }, orderBy: { createdAt: 'desc' } })
-  const paid = await prisma.paymentAllocation.groupBy({ by: ['invoiceId'], where: { tenantId: tid(req) }, _sum: { amount: true } })
-  res.json(invoices.map((i) => { const amount = Number(paid.find((p) => p.invoiceId === i.id)?._sum.amount ?? 0); return { ...i, paid: amount, balance: Number(i.total) - amount } }))
+  const [paid, credited] = await Promise.all([prisma.paymentAllocation.groupBy({ by: ['invoiceId'], where: { tenantId: tid(req) }, _sum: { amount: true } }), prisma.creditNote.groupBy({ by: ['invoiceId'], where: { tenantId: tid(req), invoiceId: { not: null }, status: 'ISSUED' }, _sum: { total: true } })])
+  res.json(invoices.map((i) => { const amount = Number(paid.find((p) => p.invoiceId === i.id)?._sum.amount ?? 0), credit = Number(credited.find((p) => p.invoiceId === i.id)?._sum.total ?? 0); return { ...i, paid: amount, credited: credit, balance: Math.max(0, Number(i.total) - amount - credit) } }))
 })
+router.get('/credit-notes', async (req, res) => res.json(await prisma.creditNote.findMany({ where: { tenantId: tid(req) }, orderBy: { createdAt: 'desc' } })))
 
 router.post('/invoices/from-order/:orderId', async (req, res) => {
   const tenantId = tid(req)
@@ -38,33 +40,15 @@ router.post('/invoices/from-order/:orderId', async (req, res) => {
 router.post('/payments', async (req, res) => {
   const input = z.object({ customerId: z.string(), amount: z.number().positive(), method: z.enum(['QPAY', 'BANK', 'CASH', 'STRIPE']), reference: z.string().min(3) }).parse(req.body)
   const tenantId = tid(req)
-  const result = await prisma.$transaction(async (tx) => {
-    await assertPeriodOpen(tx, tenantId)
-    const duplicate = await tx.paymentRecord.findUnique({ where: { tenantId_reference: { tenantId, reference: input.reference } } })
-    if (duplicate) return { payment: duplicate, allocated: 0, idempotent: true }
-    const payment = await tx.paymentRecord.create({ data: { ...input, tenantId, recordedBy: req.user!.id } })
-    const invoices = await tx.invoice.findMany({ where: { tenantId, status: { in: ['OPEN', 'PARTIAL'] } }, orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }] })
-    let remaining = input.amount
-    for (const invoice of invoices) {
-      if (remaining <= 0) break
-      const sum = await tx.paymentAllocation.aggregate({ where: { tenantId, invoiceId: invoice.id }, _sum: { amount: true } })
-      const due = Number(invoice.total) - Number(sum._sum.amount ?? 0), amount = Math.min(due, remaining)
-      if (amount <= 0) continue
-      await tx.paymentAllocation.create({ data: { tenantId, paymentId: payment.id, invoiceId: invoice.id, amount } })
-      await tx.invoice.update({ where: { id: invoice.id }, data: { status: amount >= due ? 'PAID' : 'PARTIAL' } }); remaining -= amount
-    }
-    const period = payment.paidAt.toISOString().slice(0, 7)
-    await tx.financialEntry.createMany({ data: [{ tenantId, account: input.method === 'CASH' ? 'CASH' : 'BANK', reference: input.reference, debit: input.amount, period, createdBy: req.user!.id }, { tenantId, account: 'ACCOUNTS_RECEIVABLE', reference: input.reference, credit: input.amount - remaining, period, createdBy: req.user!.id }] })
-    return { payment, allocated: input.amount - remaining, unallocated: remaining, idempotent: false }
-  }, { isolationLevel: 'Serializable' })
+  const result = await prisma.$transaction((tx) => postPayment(tx, { ...input, tenantId, recordedBy: req.user!.id }), { isolationLevel: 'Serializable' })
   res.status(result.idempotent ? 200 : 201).json(result)
 })
 
 router.get('/receivables/aging', async (req, res) => {
   const invoices = await prisma.invoice.findMany({ where: { tenantId: tid(req), status: { in: ['OPEN', 'PARTIAL'] } } })
-  const allocations = await prisma.paymentAllocation.groupBy({ by: ['invoiceId'], where: { tenantId: tid(req) }, _sum: { amount: true } })
+  const [allocations, credits] = await Promise.all([prisma.paymentAllocation.groupBy({ by: ['invoiceId'], where: { tenantId: tid(req) }, _sum: { amount: true } }), prisma.creditNote.groupBy({ by: ['invoiceId'], where: { tenantId: tid(req), invoiceId: { not: null }, status: 'ISSUED' }, _sum: { total: true } })])
   const buckets = { current: 0, days30: 0, days60: 0, days90Plus: 0 }
-  for (const i of invoices) { const balance = Number(i.total) - Number(allocations.find((a) => a.invoiceId === i.id)?._sum.amount ?? 0), age = Math.floor((Date.now() - i.createdAt.getTime()) / 86400000); if (age >= 90) buckets.days90Plus += balance; else if (age >= 60) buckets.days60 += balance; else if (age >= 30) buckets.days30 += balance; else buckets.current += balance }
+  for (const i of invoices) { const balance = Math.max(0, Number(i.total) - Number(allocations.find((a) => a.invoiceId === i.id)?._sum.amount ?? 0) - Number(credits.find((a) => a.invoiceId === i.id)?._sum.total ?? 0)), age = Math.floor((Date.now() - i.createdAt.getTime()) / 86400000); if (age >= 90) buckets.days90Plus += balance; else if (age >= 60) buckets.days60 += balance; else if (age >= 30) buckets.days30 += balance; else buckets.current += balance }
   res.json({ buckets, total: Object.values(buckets).reduce((a, b) => a + b, 0) })
 })
 router.get('/ledger', async (req, res) => res.json(await prisma.financialEntry.findMany({ where: { tenantId: tid(req) }, orderBy: { createdAt: 'desc' }, take: 500 })))

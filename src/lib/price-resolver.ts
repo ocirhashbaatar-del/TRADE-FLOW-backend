@@ -30,5 +30,6 @@ export async function resolvePrice(db: Db, input: { tenantId: string; productId:
     orderBy: { discountPct: 'desc' },
   })
   const discounted = promotion ? Math.max(0, basePrice - (promotion.discountAmt ? Number(promotion.discountAmt) : basePrice * Number(promotion.discountPct ?? 0) / 100)) : basePrice
-  return { price: discounted, source: promotion ? `PROMOTION:${promotion.id}` : selected ? `RULE:${selected.id}` : 'RETAIL' }
+  const ruleType = selected?.customerId ? 'CONTRACT' : selected?.groupCode ? 'GROUP' : 'TIER'
+  return { price: discounted, source: promotion ? `PROMOTION:${promotion.id}` : selected ? `RULE:${ruleType}:${selected.id}` : 'RETAIL' }
 }

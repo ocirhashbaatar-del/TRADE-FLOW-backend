@@ -7,6 +7,9 @@ const tenantModels = new Set([
   'InventoryCount', 'StockTransfer', 'Shipment', 'ShipmentLine', 'SupplierRelationship', 'PurchaseOrder',
   'PurchaseOrderLine', 'Invoice', 'PaymentRecord', 'PaymentAllocation', 'QPayPayment', 'EbarimtReceipt',
   'FinancialEntry', 'PeriodLock', 'CustomerAccount', 'CustomerInvitation', 'ReturnRequest', 'SupplierPayable', 'Order',
+  'OrderStatusHistory', 'ProductSupplier', 'CreditNote',
+  'GoodsReceipt', 'GoodsReceiptLine', 'ExpiryAlert', 'BankTransfer',
+  'Coupon', 'DeliveryZone', 'CreditApproval',
 ])
 
 const scopedWhere = (model: string, args: any) => {

@@ -27,10 +27,12 @@ import deliveryRoutes from './routes/delivery.routes.js'
 import adminRoutes from './routes/admin.routes.js'
 import catalogRoutes from './routes/catalog.routes.js'
 import shoppingRoutes from './routes/shopping.routes.js'
+import commerceRoutes from './routes/commerce.routes.js'
 import { errorHandler, notFound } from './middleware/error.js'
 import { openApiSpec } from './swagger.js'
 import { requestContext } from './middleware/request-context.js'
 import { notifyTenant } from './socket.js'
+import { prisma } from './lib/prisma.js'
 
 export const app = express()
 app.set('trust proxy', 1)
@@ -50,6 +52,7 @@ app.use((req, res, next) => {
     const realtimeRequest = req as typeof req & { realtimeEmitted?: boolean }
     if (mutation && res.statusCode >= 200 && res.statusCode < 300 && req.user?.tenantId && !realtimeRequest.realtimeEmitted) {
       notifyTenant(req.user.tenantId, 'entity.updated', { action: req.method, entityType: req.path.split('/').filter(Boolean)[2] ?? 'resource', entityId: req.params.id ?? '', actorId: req.user.id })
+      void prisma.auditLog.create({ data: { tenantId: req.user.tenantId, actorId: req.user.id, action: req.method, entityType: req.baseUrl.split('/').filter(Boolean).at(-1) ?? 'resource', entityId: String(req.params.id ?? req.path), after: { path: req.originalUrl, status: res.statusCode } } }).catch(() => undefined)
     }
   })
   next()
@@ -78,5 +81,6 @@ app.use('/api/v1/b2b', b2bRoutes)
 app.use('/api/v1/deliveries', deliveryRoutes)
 app.use('/api/v1/admin', adminRoutes)
 app.use('/api/v1/catalog', catalogRoutes)
+app.use('/api/v1/commerce', commerceRoutes)
 app.use(notFound)
 app.use(errorHandler)

@@ -7,6 +7,7 @@ import { syncProductStock } from '../lib/inventory.js'
 import PDFDocument from 'pdfkit'
 import { sendMail } from '../lib/services.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
+import { assertPeriodOpen } from '../lib/period-lock.js'
 
 const router = Router()
 router.use(authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR))
@@ -36,11 +37,25 @@ router.post('/suppliers', async (req, res) => {
   await audit(req, 'CREATE', 'Supplier', supplier.id, undefined, supplier)
   res.status(201).json(supplier)
 })
+router.get('/product-suppliers', async (req, res) => res.json(await prisma.productSupplier.findMany({ where: { tenantId: tenant(req), active: true }, orderBy: [{ productId: 'asc' }, { preferred: 'desc' }] })))
+router.put('/suppliers/:supplierId/products/:productId', async (req, res) => {
+  const input = z.object({ preferred: z.boolean().default(false), minOrderQty: z.number().int().positive().default(1), usualOrderQty: z.number().int().positive().optional(), leadTimeDays: z.number().int().nonnegative().default(0), unitCost: z.number().positive(), active: z.boolean().default(true) }).parse(req.body)
+  const tenantId = tenant(req), supplierId = String(req.params.supplierId), productId = String(req.params.productId)
+  const [relationship, product] = await Promise.all([prisma.supplierRelationship.findUnique({ where: { tenantId_supplierId: { tenantId, supplierId } } }), prisma.product.findFirst({ where: { id: productId, tenantId } })])
+  if (!relationship || !product) return res.status(404).json({ message: 'Нийлүүлэгч эсвэл бүтээгдэхүүн олдсонгүй.' })
+  const row = await prisma.$transaction(async (tx) => {
+    if (input.preferred) await tx.productSupplier.updateMany({ where: { tenantId, productId, preferred: true }, data: { preferred: false } })
+    return tx.productSupplier.upsert({ where: { tenantId_productId_supplierId: { tenantId, productId, supplierId } }, update: input, create: { ...input, tenantId, productId, supplierId } })
+  })
+  await audit(req, 'UPSERT', 'ProductSupplier', row.id, undefined, row)
+  res.json(row)
+})
 router.get('/purchase-orders', async (req, res) => {
   const rows = await prisma.purchaseOrder.findMany({ where: { tenantId: tenant(req) }, orderBy: { createdAt: 'desc' } })
   const lines = await prisma.purchaseOrderLine.findMany({ where: { tenantId: tenant(req), purchaseOrderId: { in: rows.map((row) => row.id) } } })
   res.json(rows.map((row) => ({ ...row, lines: lines.filter((line) => line.purchaseOrderId === row.id) })))
 })
+router.get('/goods-receipts', async (req, res) => res.json(await prisma.goodsReceipt.findMany({ where: { tenantId: tenant(req) }, include: { lines: true }, orderBy: { receivedAt: 'desc' } })))
 router.post('/purchase-orders', async (req, res) => {
   const input = z.object({ supplierId: z.string(), warehouseId: z.string(), expectedAt: z.coerce.date().optional(), notes: z.string().optional(), lines: z.array(z.object({ productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().positive(), unitCost: z.number().positive() })).min(1) }).parse(req.body)
   const tenantId = tenant(req)
@@ -49,38 +64,52 @@ router.post('/purchase-orders', async (req, res) => {
     if (!relationship || !warehouse) throw Object.assign(new Error('Нийлүүлэгч эсвэл агуулах олдсонгүй.'), { status: 404 })
     const po = await tx.purchaseOrder.create({ data: { tenantId, code: `PO-${Date.now()}`, supplierId: input.supplierId, warehouseId: input.warehouseId, expectedAt: input.expectedAt, notes: input.notes, createdBy: req.user!.id } })
     await tx.purchaseOrderLine.createMany({ data: input.lines.map((line) => ({ tenantId, purchaseOrderId: po.id, productId: line.productId, variantId: line.variantId, orderedQty: line.quantity, unitCost: line.unitCost })) })
+    for (const line of input.lines) {
+      const existingLinks = await tx.productSupplier.count({ where: { tenantId, productId: line.productId, active: true } })
+      await tx.productSupplier.upsert({ where: { tenantId_productId_supplierId: { tenantId, productId: line.productId, supplierId: input.supplierId } }, update: { unitCost: line.unitCost, usualOrderQty: line.quantity, active: true }, create: { tenantId, productId: line.productId, supplierId: input.supplierId, preferred: existingLinks === 0, unitCost: line.unitCost, usualOrderQty: line.quantity } })
+    }
     return po
   })
   await audit(req, 'CREATE', 'PurchaseOrder', row.id, undefined, row)
   res.status(201).json(row)
 })
 router.post('/purchase-orders/:id/receive', async (req, res) => {
-  const input = z.object({ lines: z.array(z.object({ lineId: z.string(), quantity: z.number().int().positive(), batchNumber: z.string().optional(), expiresAt: z.coerce.date().optional(), damaged: z.number().int().nonnegative().default(0) })).min(1) }).parse(req.body)
+  const input = z.object({ notes: z.string().optional(), lines: z.array(z.object({ lineId: z.string(), quantity: z.number().int().positive(), batchNumber: z.string().trim().min(1).optional(), expiresAt: z.coerce.date().optional(), damaged: z.number().int().nonnegative().default(0) }).refine((line) => line.damaged <= line.quantity, 'Гэмтсэн тоо хүлээн авсан тооноос их байж болохгүй.')).min(1) }).parse(req.body)
   const tenantId = tenant(req)
   const result = await prisma.$transaction(async (tx) => {
+    await assertPeriodOpen(tx, tenantId)
     const po = await tx.purchaseOrder.findFirst({ where: { id: req.params.id, tenantId } })
     if (!po || po.status === PurchaseOrderStatus.CLOSED || po.status === PurchaseOrderStatus.CANCELLED) throw Object.assign(new Error('PO хүлээн авах боломжгүй.'), { status: 409 })
+    const receipt = await tx.goodsReceipt.create({ data: { tenantId, code: `GR-${Date.now()}`, purchaseOrderId: po.id, supplierId: po.supplierId, warehouseId: po.warehouseId, notes: input.notes, receivedBy: req.user!.id } })
     for (const received of input.lines) {
       const line = await tx.purchaseOrderLine.findFirst({ where: { id: received.lineId, purchaseOrderId: po.id, tenantId } })
       if (!line || line.receivedQty + received.quantity > line.orderedQty) throw Object.assign(new Error('Хүлээн авалтын тоо PO-оос хэтэрсэн.'), { status: 409 })
+      const product = await tx.product.findFirstOrThrow({ where: { id: line.productId, tenantId } })
+      if (product.trackBatch && !received.batchNumber) throw Object.assign(new Error(`${product.name}: batch дугаар заавал оруулна.`), { status: 400 })
+      if (product.trackExpiry && !received.expiresAt) throw Object.assign(new Error(`${product.name}: дуусах хугацаа заавал оруулна.`), { status: 400 })
+      if (received.expiresAt && received.expiresAt <= new Date()) throw Object.assign(new Error(`${product.name}: хугацаа дууссан бараа хүлээн авах боломжгүй.`), { status: 400 })
       const accepted = received.quantity - received.damaged
+      const expected = line.orderedQty - line.receivedQty
       await tx.purchaseOrderLine.update({ where: { id: line.id }, data: { receivedQty: { increment: received.quantity } } })
+      await tx.goodsReceiptLine.create({ data: { tenantId, goodsReceiptId: receipt.id, purchaseOrderLineId: line.id, productId: line.productId, expectedQuantity: expected, receivedQuantity: received.quantity, acceptedQuantity: accepted, damagedQuantity: received.damaged, discrepancyQuantity: received.quantity - expected, batchNumber: received.batchNumber, expiresAt: received.expiresAt, unitCost: line.unitCost } })
       const balance = await tx.inventoryBalance.upsert({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '' } }, create: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '', onHand: accepted }, update: { onHand: { increment: accepted } } })
       await tx.stockMovement.create({ data: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, type: StockMovementType.RECEIPT, quantity: accepted, unitCost: line.unitCost, reference: po.code, createdBy: req.user!.id } })
       if (received.batchNumber) await tx.stockBatch.upsert({ where: { tenantId_warehouseId_productId_batchNumber: { tenantId, warehouseId: po.warehouseId, productId: line.productId, batchNumber: received.batchNumber } }, create: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, batchNumber: received.batchNumber, expiresAt: received.expiresAt, quantity: accepted }, update: { quantity: { increment: accepted }, expiresAt: received.expiresAt } })
-      const product = await tx.product.findFirstOrThrow({ where: { id: line.productId, tenantId } })
       const previousQty = Math.max(0, balance.onHand - accepted)
       const weightedCost = previousQty + accepted > 0 ? (Number(product.costPrice) * previousQty + Number(line.unitCost) * accepted) / (previousQty + accepted) : Number(line.unitCost)
       await tx.product.update({ where: { id: product.id }, data: { costPrice: weightedCost } })
       await syncProductStock(tx, tenantId, product.id)
+      await tx.productSupplier.updateMany({ where: { tenantId, productId: product.id, supplierId: po.supplierId }, data: { lastPurchasedAt: new Date(), unitCost: line.unitCost } })
     }
     const allLines = await tx.purchaseOrderLine.findMany({ where: { purchaseOrderId: po.id, tenantId } })
     const receiptTotal = input.lines.reduce((sum, received) => { const line = allLines.find((row) => row.id === received.lineId); return sum + (line ? received.quantity * Number(line.unitCost) : 0) }, 0)
     if (receiptTotal > 0) await tx.supplierPayable.create({ data: { tenantId, supplierId: po.supplierId, purchaseOrderId: po.id, amount: receiptTotal, dueDate: new Date(Date.now() + 30 * 86400000) } })
     const complete = allLines.every((line) => line.receivedQty >= line.orderedQty)
-    return tx.purchaseOrder.update({ where: { id: po.id }, data: { status: complete ? PurchaseOrderStatus.RECEIVED : PurchaseOrderStatus.PARTIALLY_RECEIVED } })
+    const updated = await tx.purchaseOrder.update({ where: { id: po.id }, data: { status: complete ? PurchaseOrderStatus.RECEIVED : PurchaseOrderStatus.PARTIALLY_RECEIVED } })
+    return { ...updated, goodsReceipt: receipt }
   })
   await audit(req, 'RECEIVE', 'PurchaseOrder', result.id, undefined, result)
+  await audit(req, 'CREATE', 'GoodsReceipt', result.goodsReceipt.id, undefined, result.goodsReceipt)
   res.json(result)
 })
 router.get('/purchase-orders/:id/pdf', async (req, res) => { const result = await purchaseOrderPdf(String(req.params.id), tenant(req)); if (!result) return res.status(404).json({ message: 'PO олдсонгүй.' }); res.type('application/pdf').attachment(`${result.po.code}.pdf`).send(result.buffer) })

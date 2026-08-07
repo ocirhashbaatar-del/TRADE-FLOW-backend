@@ -21,6 +21,7 @@ const schema = z.object({
   CLOUDINARY_CLOUD_NAME: z.string().optional(), CLOUDINARY_API_KEY: z.string().optional(), CLOUDINARY_API_SECRET: z.string().optional(),
   ASSET_SOURCE_DIR: z.string().default('../Supply/public/images'),
   STRIPE_SECRET_KEY: z.string().optional(), STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  QPAY_BASE_URL: z.string().url().default('https://merchant-sandbox.qpay.mn'), QPAY_CLIENT_ID: z.string().optional(), QPAY_CLIENT_SECRET: z.string().optional(), QPAY_INVOICE_CODE: z.string().optional(), QPAY_CALLBACK_TOKEN: z.string().min(24).optional(),
   SMTP_HOST: z.string().optional(), SMTP_PORT: z.coerce.number().default(587), SMTP_USER: z.string().optional(), SMTP_PASS: z.string().optional(), MAIL_FROM: z.string().default('TradeFlow <noreply@tradeflow.mn>'),
 })
 

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { prisma } from '../lib/prisma.js'
 import { resolvePrice } from '../lib/price-resolver.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
+import { allowedOrderTransitions } from '../lib/order-state.js'
 
 const stamp = `${Date.now()}-${Math.random().toString(16).slice(2)}`
 let tenantId = '', userId = '', categoryId = '', productId = '', warehouseId = ''
@@ -35,5 +36,13 @@ describe('period lock', () => {
     const period = new Date().toISOString().slice(0, 7)
     await prisma.periodLock.create({ data: { tenantId, period, lockedBy: userId } })
     await expect(prisma.$transaction((tx) => assertPeriodOpen(tx, tenantId))).rejects.toThrow('санхүүгийн үе хаагдсан')
+  })
+})
+describe('order state machine', () => {
+  it('allows valid transitions and blocks terminal-state transitions', () => {
+    expect(allowedOrderTransitions('PAID')).toContain('CONFIRMED')
+    expect(allowedOrderTransitions('PARTIALLY_SHIPPED')).toContain('SHIPPED')
+    expect(allowedOrderTransitions('CANCELLED')).toEqual([])
+    expect(allowedOrderTransitions('RETURNED')).toEqual([])
   })
 })

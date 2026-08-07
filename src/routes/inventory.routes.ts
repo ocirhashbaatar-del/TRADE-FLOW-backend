@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { InventoryCountStatus, Role, StockMovementType, StockTransferStatus } from '@prisma/client'
+import { InventoryCountStatus, NotificationType, Role, StockMovementType, StockTransferStatus } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
@@ -145,6 +145,46 @@ router.post('/counts/:id/reject', authorize(Role.ADMIN, Role.MANAGER), async (re
 router.get('/reorder-suggestions', async (req, res) => {
   const tenantId = req.user!.tenantId!
   const products = await prisma.product.findMany({ where: { tenantId, active: true, reorderPoint: { gt: 0 } } })
-  res.json(products.filter((p) => p.stock <= p.reorderPoint).map((p) => ({ productId: p.id, name: p.name, stock: p.stock, reorderPoint: p.reorderPoint, suggestedQuantity: Math.max(p.packSize, p.reorderPoint * 2 - p.stock) })))
+  const [balances, supplierLinks] = await Promise.all([prisma.inventoryBalance.findMany({ where: { tenantId, productId: { in: products.map((p) => p.id) } } }), prisma.productSupplier.findMany({ where: { tenantId, productId: { in: products.map((p) => p.id) }, active: true }, orderBy: [{ preferred: 'desc' }, { lastPurchasedAt: 'desc' }] })])
+  const suggestions = products.map((product) => {
+    const available = balances.filter((row) => row.productId === product.id).reduce((sum, row) => sum + row.onHand - row.reserved, 0)
+    const supplier = supplierLinks.find((row) => row.productId === product.id)
+    const calculated = Math.max(product.packSize, product.reorderPoint * 2 - available)
+    return { productId: product.id, name: product.name, available, reorderPoint: product.reorderPoint, suggestedQuantity: Math.max(calculated, supplier?.minOrderQty ?? 1, supplier?.usualOrderQty ?? 0), supplier }
+  }).filter((row) => row.available <= row.reorderPoint)
+  res.json(suggestions)
+})
+router.post('/reorder-suggestions/draft-pos', staff, async (req, res) => {
+  const input = z.object({ warehouseId: z.string(), productIds: z.array(z.string()).min(1).optional() }).parse(req.body)
+  const tenantId = req.user!.tenantId!
+  const result = await prisma.$transaction(async (tx) => {
+    const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, tenantId, active: true } })
+    if (!warehouse) throw Object.assign(new Error('Агуулах олдсонгүй.'), { status: 404 })
+    const products = await tx.product.findMany({ where: { tenantId, active: true, reorderPoint: { gt: 0 }, ...(input.productIds ? { id: { in: input.productIds } } : {}) } })
+    const balances = await tx.inventoryBalance.findMany({ where: { tenantId, productId: { in: products.map((row) => row.id) } } })
+    const links = await tx.productSupplier.findMany({ where: { tenantId, productId: { in: products.map((row) => row.id) }, active: true }, orderBy: [{ preferred: 'desc' }, { lastPurchasedAt: 'desc' }] })
+    const groups = new Map<string, Array<{ productId: string; quantity: number; unitCost: number }>>()
+    for (const product of products) {
+      const available = balances.filter((row) => row.productId === product.id).reduce((sum, row) => sum + row.onHand - row.reserved, 0)
+      if (available > product.reorderPoint) continue
+      const link = links.find((row) => row.productId === product.id)
+      if (!link) throw Object.assign(new Error(`${product.name}: preferred supplier тохируулаагүй.`), { status: 409 })
+      const quantity = Math.max(product.packSize, product.reorderPoint * 2 - available, link.minOrderQty, link.usualOrderQty ?? 0)
+      groups.set(link.supplierId, [...(groups.get(link.supplierId) ?? []), { productId: product.id, quantity, unitCost: Number(link.unitCost) }])
+    }
+    const purchaseOrders = []
+    let sequence = 0
+    for (const [supplierId, lines] of groups) {
+      const po = await tx.purchaseOrder.create({ data: { tenantId, code: `PO-R-${Date.now()}-${++sequence}`, supplierId, warehouseId: warehouse.id, status: 'DRAFT', notes: 'Reorder suggestion-оос автоматаар үүссэн', createdBy: req.user!.id, expectedAt: new Date(Date.now() + Math.max(...lines.map((line) => links.find((link) => link.productId === line.productId)?.leadTimeDays ?? 0)) * 86400000) } })
+      await tx.purchaseOrderLine.createMany({ data: lines.map((line) => ({ tenantId, purchaseOrderId: po.id, productId: line.productId, orderedQty: line.quantity, unitCost: line.unitCost })) })
+      purchaseOrders.push(po)
+    }
+    if (!purchaseOrders.length) throw Object.assign(new Error('Draft PO үүсгэх reorder suggestion алга.'), { status: 409 })
+    const recipients = await tx.user.findMany({ where: { tenantId, role: { in: [Role.ADMIN, Role.MANAGER] } }, select: { id: true } })
+    await tx.notification.createMany({ data: recipients.map((user) => ({ userId: user.id, title: 'Draft PO үүслээ', description: `${purchaseOrders.length} draft PO reorder suggestion-оос үүслээ.`, type: NotificationType.INVENTORY })) })
+    return purchaseOrders
+  }, { isolationLevel: 'Serializable' })
+  await audit(req, 'CREATE_DRAFT_PO', 'PurchaseOrder', result.map((row) => row.id).join(','), undefined, result)
+  res.status(201).json(result)
 })
 export default router

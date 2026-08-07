@@ -9,9 +9,10 @@ import { resolvePrice } from '../lib/price-resolver.js'
 import { tenantWhere } from '../lib/tenant-scope.js'
 
 const router = Router()
-const schema = z.object({ sku: z.string().trim().min(2).max(64).transform((value) => value.toUpperCase()), name: z.string().min(2), slug: z.string().min(2), description: z.string().min(5), price: z.coerce.number().positive(), compareAt: z.coerce.number().positive().optional(), stock: z.coerce.number().int().nonnegative(), image: z.string(), images: z.array(z.string()).default([]), tags: z.array(z.string()).default([]), featured: z.boolean().default(false), active: z.boolean().default(true), categoryId: z.string(), vendorId: z.string().optional() })
+const schema = z.object({ sku: z.string().trim().min(2).max(64).transform((value) => value.toUpperCase()), name: z.string().min(2), slug: z.string().min(2), description: z.string().min(5), price: z.coerce.number().positive(), compareAt: z.coerce.number().positive().optional(), stock: z.coerce.number().int().nonnegative(), image: z.string(), images: z.array(z.string()).default([]), tags: z.array(z.string()).default([]), featured: z.boolean().default(false), active: z.boolean().default(true), trackBatch: z.boolean().default(false), trackExpiry: z.boolean().default(false), categoryId: z.string(), vendorId: z.string().optional() }).refine((data) => !data.trackExpiry || data.trackBatch, { message: 'Expiry tracking ашиглах бол batch tracking мөн идэвхтэй байна.', path: ['trackExpiry'] })
 const shape = (p: any, resolved?: { price: number; source: string }) => ({ id: p.id, name: p.name, category: p.category.name, vendor: p.vendor.name, price: resolved?.price ?? Number(p.price), priceSource: resolved?.source ?? 'RETAIL', compareAt: p.compareAt ? Number(p.compareAt) : undefined, rating: p.rating, reviews: p.reviewCount, stock: p.stock, image: p.image, description: p.description, featured: p.featured, tags: p.tags })
-const managementShape = (p: any) => ({ id: p.id, sku: p.sku, name: p.name, slug: p.slug, categoryId: p.categoryId, category: p.category.name, vendor: p.vendor.name, price: Number(p.price), compareAt: p.compareAt ? Number(p.compareAt) : undefined, stock: p.stock, image: p.image, description: p.description, featured: p.featured, active: p.active, updatedAt: p.updatedAt })
+const extendedFields = z.object({ barcode: z.string().trim().optional(), brand: z.string().trim().optional(), unit: z.string().min(1).default('ш'), packSize: z.coerce.number().int().positive().default(1), costPrice: z.coerce.number().nonnegative().default(0), vatRate: z.coerce.number().min(0).max(100).default(10), reorderPoint: z.coerce.number().int().nonnegative().default(0), channel: z.nativeEnum(ProductChannel).default(ProductChannel.BOTH) })
+const managementShape = (p: any) => ({ id: p.id, sku: p.sku, barcode: p.barcode, brand: p.brand, unit: p.unit, packSize: p.packSize, costPrice: Number(p.costPrice), vatRate: Number(p.vatRate), reorderPoint: p.reorderPoint, channel: p.channel, trackBatch: p.trackBatch, trackExpiry: p.trackExpiry, images: p.images, name: p.name, slug: p.slug, categoryId: p.categoryId, category: p.category.name, vendor: p.vendor.name, price: Number(p.price), compareAt: p.compareAt ? Number(p.compareAt) : undefined, stock: p.stock, image: p.image, description: p.description, featured: p.featured, active: p.active, updatedAt: p.updatedAt })
 
 router.get('/manage', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), async (req, res) => {
   if (!req.user!.tenantId) return res.status(403).json({ message: 'Tenant шаардлагатай.' })
@@ -54,7 +55,7 @@ router.get('/:id', optionalAuthenticate, async (req, res) => {
 })
 router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), async (req, res) => {
   if (!req.user!.tenantId) return res.status(403).json({ message: 'Tenant шаардлагатай.' })
-  const data = schema.parse(req.body), tenantId = req.user!.tenantId
+  const data = schema.and(extendedFields).parse(req.body), tenantId = req.user!.tenantId
   const product = await prisma.$transaction(async (tx) => {
     const category = await tx.category.findFirst({ where: { id: data.categoryId, tenantId } })
     if (!category) throw Object.assign(new Error('Ангилал буруу.'), { status: 400 })
@@ -73,7 +74,7 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
   res.status(201).json(product)
 })
 router.patch('/:id', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), async (req, res) => {
-  const tenantId = req.user!.tenantId!, id = String(req.params.id), data = schema.partial().parse(req.body)
+  const tenantId = req.user!.tenantId!, id = String(req.params.id), data = schema.partial().and(extendedFields.partial()).parse(req.body)
   const product = await prisma.$transaction(async (tx) => {
     const current = await tx.product.findFirst({ where: { id, tenantId } })
     if (!current) throw Object.assign(new Error('Бүтээгдэхүүн олдсонгүй.'), { status: 404 })

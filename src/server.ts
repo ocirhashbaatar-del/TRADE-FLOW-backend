@@ -5,6 +5,7 @@ import { prisma } from './lib/prisma.js'
 import { connectRedis, redis } from './lib/redis.js'
 import { createSocketServer } from './socket.js'
 import { startReservationWorker } from './lib/reservation-worker.js'
+import { startExpiryWorker } from './lib/expiry-worker.js'
 
 const server = createServer(app)
 createSocketServer(server)
@@ -13,6 +14,7 @@ async function start() {
   await prisma.$connect()
   await connectRedis()
   startReservationWorker()
+  startExpiryWorker()
   server.listen(env.PORT, () => console.log(`TradeFlow API: http://localhost:${env.PORT}\nSwagger: http://localhost:${env.PORT}/api/docs`))
 }
 

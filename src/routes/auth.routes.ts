@@ -26,6 +26,30 @@ const oauthErrorCode = (error: unknown) => {
   return 'oauth_failed'
 }
 
+router.post('/phone/request', async (req, res) => {
+  const { phone } = z.object({ phone: z.string().min(8).max(20) }).parse(req.body)
+  const user = await prisma.user.findFirst({ where: { phone } })
+  if (!user) return res.status(404).json({ message: 'Энэ утасны дугаартай бүртгэл олдсонгүй.' })
+  await prisma.otpChallenge.deleteMany({ where: { phone, verifiedAt: null } })
+  const code = String(crypto.randomInt(100000, 999999))
+  const challenge = await prisma.otpChallenge.create({ data: { phone, codeHash: await bcrypt.hash(code, 10), expiresAt: new Date(Date.now() + 5 * 60_000) } })
+  // Production SMS provider нь OTP-г эндээс илгээнэ; API response-д код задрахгүй.
+  res.status(201).json({ challengeId: challenge.id, expiresIn: 300, ...(env.NODE_ENV !== 'production' ? { devCode: code } : {}) })
+})
+
+router.post('/phone/verify', async (req, res) => {
+  const input = z.object({ challengeId: z.string(), code: z.string().length(6) }).parse(req.body)
+  const challenge = await prisma.otpChallenge.findUnique({ where: { id: input.challengeId } })
+  if (!challenge || challenge.verifiedAt || challenge.expiresAt < new Date() || challenge.attempts >= 5) return res.status(400).json({ message: 'OTP хүчингүй эсвэл хугацаа дууссан.' })
+  await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } })
+  if (!await bcrypt.compare(input.code, challenge.codeHash)) return res.status(400).json({ message: 'OTP код буруу.' })
+  const user = await prisma.user.findFirst({ where: { phone: challenge.phone } })
+  if (!user) return res.status(404).json({ message: 'Хэрэглэгч олдсонгүй.' })
+  await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { verifiedAt: new Date() } })
+  const tokens = await issueTokens(user)
+  res.json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
+})
+
 router.post('/guest', async (req, res) => {
   const { guestId } = z.object({ guestId: z.string().min(8).max(100) }).parse(req.body)
   const tenant = await findStorefrontTenant()
@@ -265,10 +289,4 @@ router.post('/reset-password', async (req, res) => {
   res.json({ message: 'Нууц үг амжилттай шинэчлэгдлээ.' })
 })
 
-router.post('/seed-tenant', async (req, res) => {
-  const existing = await prisma.tenant.findFirst({ where: { active: true } })
-  if (existing) return res.json({ message: 'already exists', tenant: existing })
-  const tenant = await prisma.tenant.create({ data: { name: 'FreshFlow', slug: 'freshflow', active: true } })
-  res.json({ message: 'created', tenant })
-})
 export default router

@@ -53,4 +53,49 @@ router.get('/catalog', async (req, res) => {
   })
   res.json(rows)
 })
+router.post('/quick-order', async (req, res) => {
+  const input = z.object({ lines: z.array(z.object({ sku: z.string().min(1), quantity: z.number().int().positive() })).min(1) }).parse(req.body)
+  const products = await prisma.product.findMany({ where: { tenantId: tid(req), sku: { in: input.lines.map((line) => line.sku) }, active: true, channel: { in: [ProductChannel.BOTH, ProductChannel.B2B] } } })
+  const missing = input.lines.filter((line) => !products.some((product) => product.sku === line.sku)).map((line) => line.sku)
+  res.json({ lines: input.lines.flatMap((line) => { const product = products.find((row) => row.sku === line.sku); return product ? [{ productId: product.id, sku: line.sku, name: product.name, quantity: line.quantity }] : [] }), missing })
+})
+router.post('/reorder/:orderId', async (req, res) => {
+  const order = await prisma.order.findFirst({ where: { id: String(req.params.orderId), tenantId: tid(req), userId: req.user!.id }, include: { items: { include: { product: true } } } })
+  if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })
+  res.json({ lines: order.items.filter((line) => line.product.active).map((line) => ({ productId: line.productId, sku: line.product.sku, name: line.product.name, quantity: line.quantity })) })
+})
+router.post('/csv-preview', async (req, res) => {
+  const { csv } = z.object({ csv: z.string().min(3) }).parse(req.body)
+  const lines = csv.split(/\r?\n/).slice(1).filter(Boolean).map((row) => { const [sku, quantity] = row.split(','); return { sku: String(sku).trim(), quantity: Number(quantity) } }).filter((line) => line.sku && Number.isInteger(line.quantity) && line.quantity > 0)
+  const products = await prisma.product.findMany({ where: { tenantId: tid(req), sku: { in: lines.map((line) => line.sku) }, active: true } })
+  res.json({ lines: lines.flatMap((line) => { const product = products.find((row) => row.sku === line.sku); return product ? [{ productId: product.id, name: product.name, ...line }] : [] }), errors: lines.filter((line) => !products.some((row) => row.sku === line.sku)).map((line) => `${line.sku}: бараа олдсонгүй`) })
+})
+router.post('/credit-approvals', async (req, res) => {
+  const customer = await prisma.customerAccount.findFirst({ where: { tenantId: tid(req), userId: req.user!.id, active: true } })
+  if (!customer) return res.status(403).json({ message: 'B2B эрхгүй.' })
+  const input = z.object({ amount: z.number().positive(), reason: z.string().min(3).optional() }).parse(req.body)
+  res.status(201).json(await prisma.creditApproval.create({ data: { tenantId: tid(req), customerId: customer.id, requestedBy: req.user!.id, ...input } }))
+})
+router.get('/credit-approvals', async (req, res) => {
+  const staff = [Role.ADMIN, Role.MANAGER].some((role) => role === req.user!.role)
+  const customer = staff ? null : await prisma.customerAccount.findFirst({ where: { tenantId: tid(req), userId: req.user!.id } })
+  res.json(await prisma.creditApproval.findMany({ where: { tenantId: tid(req), ...(customer ? { customerId: customer.id } : {}) }, orderBy: { createdAt: 'desc' } }))
+})
+router.post('/credit-approvals/:id/approve', authorize(Role.ADMIN, Role.MANAGER), async (req, res) => {
+  const result = await prisma.$transaction(async (tx) => {
+    const approval = await tx.creditApproval.findFirst({ where: { id: String(req.params.id), tenantId: tid(req), status: 'PENDING' } })
+    if (!approval) throw Object.assign(new Error('Хүлээгдэж буй хүсэлт олдсонгүй.'), { status: 404 })
+    await tx.customerAccount.update({ where: { id: approval.customerId }, data: { creditLimit: { increment: approval.amount } } })
+    return tx.creditApproval.update({ where: { id: approval.id }, data: { status: 'APPROVED', reviewedBy: req.user!.id, reviewedAt: new Date() } })
+  })
+  res.json(result)
+})
+router.get('/payments', async (req, res) => {
+  const customer = await prisma.customerAccount.findFirst({ where: { tenantId: tid(req), userId: req.user!.id } })
+  res.json(customer ? await prisma.paymentRecord.findMany({ where: { tenantId: tid(req), customerId: customer.id }, orderBy: { paidAt: 'desc' } }) : [])
+})
+router.get('/returns', async (req, res) => {
+  const orderIds = (await prisma.order.findMany({ where: { tenantId: tid(req), userId: req.user!.id }, select: { id: true } })).map((row) => row.id)
+  res.json(await prisma.returnRequest.findMany({ where: { tenantId: tid(req), orderId: { in: orderIds } }, orderBy: { createdAt: 'desc' } }))
+})
 export default router
