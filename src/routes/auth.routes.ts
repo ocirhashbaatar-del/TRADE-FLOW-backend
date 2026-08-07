@@ -152,6 +152,12 @@ router.get('/oauth/:provider/start', async (req, res) => {
 })
 
 router.get('/oauth/:provider/callback', async (req, res) => {
+  // Facebook's link-preview crawler may follow the callback URL before the
+  // user's browser and consume the single-use authorization code. Never run
+  // OAuth state verification or code exchange for crawler requests.
+  const userAgent = req.get('user-agent') ?? ''
+  if (/facebookexternalhit|facebot/i.test(userAgent)) return res.status(200).send('OK')
+
   const provider = z.enum(['google', 'github', 'facebook']).parse(req.params.provider)
   try {
     const providerError = z.object({ error: z.string(), error_reason: z.string().optional() }).safeParse(req.query)
