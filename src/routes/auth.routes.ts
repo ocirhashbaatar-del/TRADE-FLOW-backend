@@ -18,6 +18,7 @@ const credentials = z.object({ email: z.email(), password: z.string().min(8) })
 const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID)
 const publicUser = (user: { id: string; name: string; email: string; role: string; tenant: string; phone: string | null; avatar: string | null; emailVerified: Date | null; platformAdmin: boolean }) => ({ id: user.id, name: user.name, email: user.email, role: user.role[0] + user.role.slice(1).toLowerCase(), tenant: user.tenant, phone: user.phone ?? undefined, avatar: user.avatar ?? undefined, emailVerified: Boolean(user.emailVerified), platformAdmin: user.platformAdmin })
 const randomToken = () => crypto.randomBytes(32).toString('hex')
+const normalizePhone = (value: string) => value.replace(/[^0-9+]/g, '')
 const oauthErrorCode = (error: unknown) => {
   const message = error instanceof Error ? error.message : ''
   if (message.includes('configuration missing')) return 'not_configured'
@@ -28,7 +29,7 @@ const oauthErrorCode = (error: unknown) => {
 }
 
 router.post('/phone/request', async (req, res) => {
-  const { phone } = z.object({ phone: z.string().min(8).max(20) }).parse(req.body)
+  const parsed = z.object({ phone: z.string().min(8).max(20) }).parse(req.body), phone = normalizePhone(parsed.phone)
   const user = await prisma.user.findFirst({ where: { phone } })
   if (!user) return res.status(404).json({ message: 'Энэ утасны дугаартай бүртгэл олдсонгүй.' })
   await prisma.otpChallenge.deleteMany({ where: { phone, verifiedAt: null } })
@@ -36,6 +37,29 @@ router.post('/phone/request', async (req, res) => {
   const challenge = await prisma.otpChallenge.create({ data: { phone, codeHash: await bcrypt.hash(code, 10), expiresAt: new Date(Date.now() + 5 * 60_000) } })
   // Production SMS provider нь OTP-г эндээс илгээнэ; API response-д код задрахгүй.
   res.status(201).json({ challengeId: challenge.id, expiresIn: 300, ...(env.NODE_ENV !== 'production' ? { devCode: code } : {}) })
+})
+
+router.post('/phone/register/request', async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(2), phone: z.string().min(8).max(20) }).parse(req.body), phone = normalizePhone(input.phone)
+  if (await prisma.user.findUnique({ where: { phone } })) return res.status(409).json({ message: 'Энэ утасны дугаар бүртгэлтэй байна. Нэвтрэх хэсгийг ашиглана уу.' })
+  await prisma.otpChallenge.deleteMany({ where: { phone, verifiedAt: null } })
+  const code = String(crypto.randomInt(100000, 999999)), challenge = await prisma.otpChallenge.create({ data: { phone, codeHash: await bcrypt.hash(code, 10), expiresAt: new Date(Date.now() + 5 * 60_000) } })
+  res.status(201).json({ challengeId: challenge.id, expiresIn: 300, ...(env.NODE_ENV !== 'production' ? { devCode: code } : {}) })
+})
+
+router.post('/phone/register/verify', async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(2), challengeId: z.string(), code: z.string().length(6) }).parse(req.body)
+  const challenge = await prisma.otpChallenge.findUnique({ where: { id: input.challengeId } })
+  if (!challenge || challenge.verifiedAt || challenge.expiresAt < new Date() || challenge.attempts >= 5) return res.status(400).json({ message: 'OTP хүчингүй эсвэл хугацаа дууссан.' })
+  await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } })
+  if (!await bcrypt.compare(input.code, challenge.codeHash)) return res.status(400).json({ message: 'OTP код буруу.' })
+  if (await prisma.user.findUnique({ where: { phone: challenge.phone } })) return res.status(409).json({ message: 'Энэ дугаар бүртгэлтэй байна.' })
+  const tenant = await findStorefrontTenant(req.hostname); if (!tenant) return res.status(503).json({ message: 'Үйлчилгээний байгууллага тохируулагдаагүй байна.' })
+  await prisma.$transaction((tx) => assertSubscriptionCapacity(tx, tenant.id, 'users'))
+  const email = `phone-${challenge.phone.replace(/\D/g, '')}@phone.tradeflow.local`
+  const user = await prisma.$transaction(async (tx) => { const created = await tx.user.create({ data: { name: input.name, phone: challenge.phone, email, emailVerified: new Date(), role: 'CUSTOMER', tenant: tenant.name, tenantId: tenant.id } }); await tx.otpChallenge.update({ where: { id: challenge.id }, data: { verifiedAt: new Date() } }); return created })
+  const tokens = await issueTokens(user)
+  res.status(201).json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
 })
 
 router.post('/phone/verify', async (req, res) => {

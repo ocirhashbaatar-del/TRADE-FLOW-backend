@@ -105,7 +105,7 @@ model User {
   email               String                   @unique
   passwordHash        String?
   emailVerified       DateTime?
-  phone               String?
+  phone               String?                  @unique
   avatar              String?
   platformAdmin       Boolean                  @default(false)
   role                Role                     @default(CUSTOMER)
