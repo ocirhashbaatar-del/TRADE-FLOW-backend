@@ -59,8 +59,17 @@ router.post('/', async (req, res) => {
     return created
   }, { isolationLevel: 'Serializable' })
   await audit(req, 'CREATE', 'Order', order.id, undefined, order)
-  const notification = await prisma.notification.create({ data: { userId: req.user!.id, title: 'Захиалга баталгаажлаа', description: `${order.orderNumber} захиалгыг хүлээн авлаа.`, type: NotificationType.ORDER } })
-  notifyUser(req.user!.id, 'notification:new', notification)
+  const staffRecipients = await prisma.user.findMany({
+    where: { tenantId, role: { in: [Role.ADMIN, Role.MANAGER] } },
+    select: { id: true },
+  })
+  const recipientIds = [...new Set([req.user!.id, ...staffRecipients.map((user) => user.id)])]
+  const notifications = await Promise.all(recipientIds.map((userId) => prisma.notification.create({
+    data: userId === req.user!.id
+      ? { userId, title: 'Захиалга баталгаажлаа', description: `${order.orderNumber} захиалгыг хүлээн авлаа.`, type: NotificationType.ORDER }
+      : { userId, title: 'Шинэ захиалга ирлээ', description: `${order.orderNumber} · ${order.recipientName} · ${order.total.toLocaleString()}₮`, type: NotificationType.ORDER },
+  })))
+  for (const notification of notifications) notifyUser(notification.userId, 'notification:new', notification)
   void sendMail(req.user!.email, 'Захиалга баталгаажлаа', `<h2>${order.orderNumber}</h2><p>Таны захиалгыг амжилттай хүлээн авлаа.</p>`)
   res.status(201).json({ ...order, trackingToken })
 })
