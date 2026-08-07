@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/src/server.js",
-    "deploy:start": "prisma migrate deploy && node dist/src/server.js",
+    "deploy:start": "prisma migrate deploy && node dist/prisma/seed.js && node dist/src/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prisma:generate": "prisma generate",

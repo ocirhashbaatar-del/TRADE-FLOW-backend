@@ -41,6 +41,7 @@ router.post('/accept-invite', async (req, res) => {
   if (!invitation || invitation.acceptedAt || invitation.expiresAt < new Date()) return res.status(400).json({ message: 'Урилга хүчингүй эсвэл хугацаа дууссан.' })
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: invitation.tenantId } })
   const user = await prisma.user.upsert({ where: { email: invitation.email }, update: { name: invitation.name, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash: await bcrypt.hash(input.password, 12) }, create: { name: invitation.name, email: invitation.email, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash: await bcrypt.hash(input.password, 12), emailVerified: new Date() } })
+  await prisma.refreshToken.deleteMany({ where: { userId: user.id } })
   await prisma.staffInvitation.update({ where: { id: invitation.id }, data: { acceptedAt: new Date() } })
   const tokens = await issueTokens(user)
   res.json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
@@ -146,13 +147,19 @@ router.get('/oauth/:provider/start', async (req, res) => {
     ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&response_type=code&scope=openid%20email%20profile&access_type=offline&prompt=select_account%20consent&state=${encodeURIComponent(state)}`
     : provider === 'github'
       ? `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&scope=read:user%20user:email&state=${encodeURIComponent(state)}`
-      : `https://www.facebook.com/dialog/oauth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&response_type=code&scope=email,public_profile&state=${encodeURIComponent(state)}`
+      : `https://www.facebook.com/dialog/oauth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&response_type=code&scope=email&state=${encodeURIComponent(state)}`
   res.redirect(url)
 })
 
 router.get('/oauth/:provider/callback', async (req, res) => {
   const provider = z.enum(['google', 'github', 'facebook']).parse(req.params.provider)
   try {
+    const providerError = z.object({ error: z.string(), error_reason: z.string().optional() }).safeParse(req.query)
+    if (providerError.success) {
+      const callbackUrl = new URL(env.AUTH_CALLBACK_URL)
+      callbackUrl.searchParams.set('error', providerError.data.error === 'access_denied' || providerError.data.error_reason === 'user_denied' ? 'access_denied' : `${provider}_failed`)
+      return res.redirect(callbackUrl.toString())
+    }
     const { code, state } = z.object({ code: z.string(), state: z.string() }).parse(req.query)
     const statePayload = jwt.verify(state, env.JWT_ACCESS_SECRET) as { provider: string }
     if (statePayload.provider !== provider) throw new Error('OAuth state mismatch')

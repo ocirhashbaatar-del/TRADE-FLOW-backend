@@ -32,7 +32,7 @@ Create an app, add **Facebook Login**, and configure:
 - App domain for local testing: `localhost`
 - Valid OAuth Redirect URI: `http://localhost:4000/api/v1/auth/oauth/facebook/callback`
 - Enable client OAuth login and web OAuth login
-- Request `email` and `public_profile`
+- Request the `email` permission (`public_profile` is included automatically)
 - Copy values to `FACEBOOK_CLIENT_ID` and `FACEBOOK_CLIENT_SECRET`
 
 ## Backend environment
@@ -53,4 +53,3 @@ Redis must be running because callback results are exchanged through a two-minut
 ## Production
 
 Replace localhost URLs with HTTPS production URLs in both provider consoles and environment variables. Keep development and production OAuth applications separate where possible.
-

@@ -3,10 +3,10 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
-import { authenticate, authorize, authorizeEmails, requireTenant } from '../middleware/auth.js'
+import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 
 const router = Router()
-router.use(authenticate, requireTenant, authorize(Role.TRANSPORTER), authorizeEmails('gardi@gmail.com'))
+router.use(authenticate, requireTenant, authorize(Role.TRANSPORTER))
 
 router.get('/', async (req, res) => {
   const orders = await prisma.order.findMany({
