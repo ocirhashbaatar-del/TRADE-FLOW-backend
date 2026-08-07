@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { authenticate, authorize } from '../middleware/auth.js'
 import { cacheDelete, cacheGet, cacheSet } from '../lib/redis.js'
+import { findStorefrontTenant } from '../utils/storefront-tenant.js'
 
 const router = Router()
 const schema = z.object({ sku: z.string().trim().min(2).max(64).transform((value) => value.toUpperCase()), name: z.string().min(2), slug: z.string().min(2), description: z.string().min(5), price: z.coerce.number().positive(), compareAt: z.coerce.number().positive().optional(), stock: z.coerce.number().int().nonnegative(), image: z.string(), images: z.array(z.string()).default([]), tags: z.array(z.string()).default([]), featured: z.boolean().default(false), active: z.boolean().default(true), categoryId: z.string(), vendorId: z.string().optional() })
@@ -23,7 +24,7 @@ router.get('/manage', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VEN
 
 router.get('/', async (req, res) => {
   const query = z.object({ q: z.string().optional(), category: z.string().optional(), tenant: z.string().optional() }).parse(req.query)
-  const selectedTenant = query.tenant ? await prisma.tenant.findUnique({ where: { slug: query.tenant } }) : await prisma.tenant.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } })
+  const selectedTenant = query.tenant ? await prisma.tenant.findFirst({ where: { slug: query.tenant, active: true } }) : await findStorefrontTenant()
   if (!selectedTenant) return res.json([])
   const key = `products:${selectedTenant.id}:${query.q ?? ''}:${query.category ?? ''}`
   const cached = await cacheGet(key); if (cached) return res.json(cached)
