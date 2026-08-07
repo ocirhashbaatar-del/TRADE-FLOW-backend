@@ -5,6 +5,8 @@ import { prisma } from '../lib/prisma.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
 import { postPayment } from '../lib/payment-posting.js'
+import PDFDocument from 'pdfkit'
+import { sendMail } from '../lib/services.js'
 
 const router = Router()
 router.use(authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.ACCOUNTANT))
@@ -16,6 +18,26 @@ router.get('/invoices', async (req, res) => {
   res.json(invoices.map((i) => { const amount = Number(paid.find((p) => p.invoiceId === i.id)?._sum.amount ?? 0), credit = Number(credited.find((p) => p.invoiceId === i.id)?._sum.total ?? 0); return { ...i, paid: amount, credited: credit, balance: Math.max(0, Number(i.total) - amount - credit) } }))
 })
 router.get('/credit-notes', async (req, res) => res.json(await prisma.creditNote.findMany({ where: { tenantId: tid(req) }, orderBy: { createdAt: 'desc' } })))
+
+router.get('/invoices/:id/pdf', async (req, res) => {
+  const invoice = await prisma.invoice.findFirst({ where: { id: String(req.params.id), tenantId: tid(req) } })
+  if (!invoice) return res.status(404).json({ message: 'Нэхэмжлэл олдсонгүй.' })
+  const order = await prisma.order.findFirstOrThrow({ where: { id: invoice.orderId, tenantId: tid(req) }, include: { user: true, items: { include: { product: true } } } })
+  const customer = await prisma.customerAccount.findFirst({ where: { tenantId: tid(req), userId: order.userId } })
+  const doc = new PDFDocument({ margin: 42 }), chunks: Buffer[] = []
+  doc.on('data', (chunk) => chunks.push(chunk)); doc.on('end', () => res.type('application/pdf').attachment(`${invoice.code}.pdf`).send(Buffer.concat(chunks)))
+  doc.fontSize(22).text('TradeFlow Invoice').moveDown().fontSize(11).text(`Invoice: ${invoice.code}`).text(`Customer: ${customer?.name ?? order.user.name}`).text(`Payment term: ${customer ? `Credit, due ${invoice.dueDate?.toISOString().slice(0, 10) ?? 'on demand'}` : 'Prepaid'}`).text(`Contract/group: ${customer?.groupCode ?? 'Retail'}`).moveDown()
+  for (const line of order.items) { const gross = Number(line.unitPrice) * line.quantity, vat = gross * Number(line.product.vatRate) / (100 + Number(line.product.vatRate)); doc.text(`${line.product.name} | ${line.quantity} x ${Number(line.unitPrice).toLocaleString()} | VAT ${Number(line.product.vatRate)}%: ${vat.toFixed(2)} | Gross: ${gross.toFixed(2)}`) }
+  doc.moveDown().text(`Subtotal: ${Number(invoice.subtotal).toFixed(2)}`).text(`VAT total: ${Number(invoice.vat).toFixed(2)}`).fontSize(14).text(`TOTAL: ${Number(invoice.total).toFixed(2)}`); doc.end()
+})
+
+router.post('/invoices/:id/remind', async (req, res) => {
+  const invoice = await prisma.invoice.findFirst({ where: { id: String(req.params.id), tenantId: tid(req), status: { in: ['OPEN', 'PARTIAL', 'PARTIALLY_CREDITED'] } } })
+  if (!invoice) return res.status(404).json({ message: 'Төлөгдөөгүй нэхэмжлэл олдсонгүй.' })
+  const order = await prisma.order.findFirstOrThrow({ where: { id: invoice.orderId, tenantId: tid(req) }, include: { user: true } })
+  if (!order.user.email.includes('@guest.tradeflow.local')) await sendMail(order.user.email, `${invoice.code} төлбөрийн сануулга`, `<p>${invoice.code} нэхэмжлэлийн ${Number(invoice.total).toLocaleString()}₮ төлбөрийн хугацаа ${invoice.dueDate?.toISOString().slice(0, 10) ?? 'нэн даруй'}.</p>`)
+  res.json({ message: 'Төлбөрийн сануулга илгээгдлээ.', invoiceId: invoice.id })
+})
 
 router.post('/invoices/from-order/:orderId', async (req, res) => {
   const tenantId = tid(req)

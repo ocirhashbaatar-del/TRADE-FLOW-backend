@@ -7,6 +7,7 @@ import { audit } from '../lib/audit.js'
 import { sendMail } from '../lib/services.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 import { hashToken } from '../utils/auth.js'
+import { resolveTxt } from 'node:dns/promises'
 
 const router = Router()
 router.use(authenticate)
@@ -15,6 +16,7 @@ const tenantId = (req: Express.Request) => req.user!.tenantId!
 const assertPlatformAdmin = async (id: string) => Boolean((await prisma.user.findUnique({ where: { id }, select: { platformAdmin: true } }))?.platformAdmin)
 const permissionModules = ['dashboard', 'catalog', 'pricing', 'procurement', 'inventory', 'orders', 'fulfillment', 'finance', 'reports', 'customers', 'users', 'settings'] as const
 const editableRoles = [Role.MANAGER, Role.EMPLOYEE, Role.VENDOR, Role.TRANSPORTER, Role.ACCOUNTANT, Role.CUSTOMER] as const
+const planRules = { MVP: { users: 5, products: 500, warehouses: 1 }, GROWTH: { users: 30, products: 10000, warehouses: 10 }, ENTERPRISE: { users: 100000, products: 1000000, warehouses: 1000 } } as const
 const defaultAccess: Partial<Record<Role, readonly string[]>> = {
   MANAGER: permissionModules,
   EMPLOYEE: ['dashboard', 'catalog', 'inventory', 'orders', 'fulfillment', 'customers'],
@@ -35,6 +37,27 @@ const ensurePermissionMatrix = async (id: string) => prisma.rolePermission.creat
 router.get('/platform/tenants', async (req, res) => { if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' }); res.json(await prisma.tenant.findMany({ orderBy: { createdAt: 'desc' } })) })
 router.post('/platform/tenants', async (req, res) => { if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' }); const input = z.object({ name: z.string().min(2), slug: z.string().regex(/^[a-z0-9-]+$/), domain: z.string().optional(), primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).default('#059669') }).parse(req.body); res.status(201).json(await prisma.tenant.create({ data: input })) })
 router.patch('/platform/tenants/:id', async (req, res) => { if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' }); const input = z.object({ name: z.string().min(2).optional(), domain: z.string().nullable().optional(), logo: z.string().nullable().optional(), primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), subscription: z.string().optional(), active: z.boolean().optional() }).parse(req.body); res.json(await prisma.tenant.update({ where: { id: String(req.params.id) }, data: input })) })
+
+router.get('/platform/health', async (req, res) => {
+  if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
+  const [tenants, users, products, orders, activeTenants] = await Promise.all([prisma.tenant.count(), prisma.user.count(), prisma.product.count(), prisma.order.count(), prisma.tenant.count({ where: { active: true } })])
+  res.json({ status: 'healthy', database: 'connected', tenants, activeTenants, users, products, orders, uptimeSeconds: Math.floor(process.uptime()), memoryMb: Math.round(process.memoryUsage().rss / 1048576), plans: planRules })
+})
+router.get('/platform/usage', async (req, res) => {
+  if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
+  const tenants = await prisma.tenant.findMany({ orderBy: { createdAt: 'desc' } }); res.json(await Promise.all(tenants.map(async (tenant) => ({ tenant, usage: { users: await prisma.user.count({ where: { tenantId: tenant.id } }), products: await prisma.product.count({ where: { tenantId: tenant.id } }), warehouses: await prisma.warehouse.count({ where: { tenantId: tenant.id } }) }, limits: planRules[(tenant.subscription in planRules ? tenant.subscription : 'MVP') as keyof typeof planRules] }))))
+})
+router.post('/platform/tenants/:id/domain/request', async (req, res) => {
+  if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
+  const tenant = await prisma.tenant.findUnique({ where: { id: String(req.params.id) } }); if (!tenant?.domain) return res.status(400).json({ message: 'Domain тохируулаагүй.' })
+  const token = `tradeflow-verification=${crypto.randomBytes(24).toString('hex')}`; await prisma.tenant.update({ where: { id: tenant.id }, data: { domainVerificationToken: token, domainVerifiedAt: null } }); res.json({ domain: tenant.domain, type: 'TXT', name: `_tradeflow.${tenant.domain}`, value: token })
+})
+router.post('/platform/tenants/:id/domain/verify', async (req, res) => {
+  if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
+  const tenant = await prisma.tenant.findUnique({ where: { id: String(req.params.id) } }); if (!tenant?.domain || !tenant.domainVerificationToken) return res.status(400).json({ message: 'Verification эхлээгүй.' })
+  const records = await resolveTxt(`_tradeflow.${tenant.domain}`).catch(() => []); if (!records.some((parts) => parts.join('') === tenant.domainVerificationToken)) return res.status(409).json({ message: 'DNS TXT record баталгаажаагүй байна.' })
+  res.json(await prisma.tenant.update({ where: { id: tenant.id }, data: { domainVerifiedAt: new Date() } }))
+})
 
 router.use(requireTenant, admin)
 router.get('/tenant', async (req, res) => res.json(await prisma.tenant.findUnique({ where: { id: tenantId(req) } })))

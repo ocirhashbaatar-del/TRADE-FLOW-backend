@@ -2,7 +2,12 @@ import { prisma } from '../lib/prisma.js'
 
 const configuredSlug = process.env.STOREFRONT_TENANT_SLUG?.trim() || 'tradeflow'
 
-export async function findStorefrontTenant() {
+export async function findStorefrontTenant(hostname?: string) {
+  const host = hostname?.split(':')[0]?.toLowerCase()
+  if (host && !['localhost', '127.0.0.1'].includes(host)) {
+    const domainTenant = await prisma.tenant.findFirst({ where: { domain: host, domainVerifiedAt: { not: null }, active: true } })
+    if (domainTenant) return domainTenant
+  }
   const configured = await prisma.tenant.findFirst({ where: { slug: configuredSlug, active: true } })
   if (configured) return configured
 

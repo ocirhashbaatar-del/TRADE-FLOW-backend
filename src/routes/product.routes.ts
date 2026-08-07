@@ -27,7 +27,7 @@ router.get('/manage', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VEN
 
 router.get('/', optionalAuthenticate, async (req, res) => {
   const query = z.object({ q: z.string().optional(), category: z.string().optional(), tenant: z.string().optional() }).parse(req.query)
-  const selectedTenant = query.tenant ? await prisma.tenant.findFirst({ where: { slug: query.tenant, active: true } }) : await findStorefrontTenant()
+  const selectedTenant = query.tenant ? await prisma.tenant.findFirst({ where: { slug: query.tenant, active: true } }) : await findStorefrontTenant(req.hostname)
   if (!selectedTenant) return res.json([])
   const customer = req.user?.tenantId === selectedTenant.id ? await prisma.customerAccount.findFirst({ where: tenantWhere(selectedTenant.id, { userId: req.user.id, active: true }) }) : null
   const key = `products:${selectedTenant.id}:${query.q ?? ''}:${query.category ?? ''}`
@@ -41,7 +41,7 @@ router.get('/', optionalAuthenticate, async (req, res) => {
 })
 router.get('/:id', optionalAuthenticate, async (req, res) => {
   const query = z.object({ tenant: z.string().optional(), quantity: z.coerce.number().int().positive().default(1), channel: z.enum(['B2C', 'B2B']).default('B2C') }).parse(req.query)
-  const selectedTenant = query.tenant ? await prisma.tenant.findFirst({ where: { slug: query.tenant, active: true } }) : await findStorefrontTenant()
+  const selectedTenant = query.tenant ? await prisma.tenant.findFirst({ where: { slug: query.tenant, active: true } }) : await findStorefrontTenant(req.hostname)
   if (!selectedTenant) return res.status(404).json({ message: 'Бүтээгдэхүүн олдсонгүй.' })
   const customer = req.user?.tenantId === selectedTenant.id ? await prisma.customerAccount.findFirst({ where: tenantWhere(selectedTenant.id, { userId: req.user.id, active: true }) }) : null
   if (query.channel === 'B2B' && !customer) return res.status(403).json({ message: 'B2B каталог үзэх эрхгүй.' })

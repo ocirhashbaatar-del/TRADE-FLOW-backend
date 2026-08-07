@@ -52,7 +52,7 @@ router.post('/phone/verify', async (req, res) => {
 
 router.post('/guest', async (req, res) => {
   const { guestId } = z.object({ guestId: z.string().min(8).max(100) }).parse(req.body)
-  const tenant = await findStorefrontTenant()
+  const tenant = await findStorefrontTenant(req.hostname)
   if (!tenant) return res.status(503).json({ message: 'Худалдааны орчин тохируулагдаагүй байна.' })
   const email = `guest-${guestId.replace(/[^a-zA-Z0-9-]/g, '')}@guest.tradeflow.local`
   const user = await prisma.user.upsert({ where: { email }, update: { tenantId: tenant.id }, create: { name: 'Зочин хэрэглэгч', email, role: 'CUSTOMER', tenant: tenant.name, tenantId: tenant.id } })
@@ -97,7 +97,7 @@ async function findOrCreateOAuthUser(provider: string, providerUserId: string, p
 router.post('/register', async (req, res) => {
   const input = credentials.extend({ name: z.string().min(2) }).parse(req.body)
   if (await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } })) return res.status(409).json({ message: 'Энэ имэйл бүртгэлтэй байна.' })
-  const tenant = await findStorefrontTenant()
+  const tenant = await findStorefrontTenant(req.hostname)
   if (!tenant) return res.status(503).json({ message: 'Үйлчилгээний байгууллага тохируулагдаагүй байна.' })
   const user = await prisma.user.create({ data: { name: input.name, email: input.email.toLowerCase(), passwordHash: await bcrypt.hash(input.password, 12), tenant: tenant.name, tenantId: tenant.id, role: 'CUSTOMER' } })
   const tokens = await issueTokens(user)

@@ -412,16 +412,18 @@ model Asset {
 }
 
 model Tenant {
-  id           String   @id @default(cuid())
-  name         String
-  slug         String   @unique
-  domain       String?  @unique
-  logo         String?
-  primaryColor String   @default("#059669")
-  subscription String   @default("MVP")
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                      String    @id @default(cuid())
+  name                    String
+  slug                    String    @unique
+  domain                  String?   @unique
+  domainVerificationToken String?
+  domainVerifiedAt        DateTime?
+  logo                    String?
+  primaryColor            String    @default("#059669")
+  subscription            String    @default("MVP")
+  active                  Boolean   @default(true)
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 }
 
 model RolePermission {

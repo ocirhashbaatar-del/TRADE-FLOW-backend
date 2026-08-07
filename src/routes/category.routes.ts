@@ -10,7 +10,7 @@ router.get('/', async (req, res) => {
   const { tenant } = z.object({ tenant: z.string().optional() }).parse(req.query)
   const selectedTenant = tenant
     ? await prisma.tenant.findFirst({ where: { slug: tenant, active: true } })
-    : await findStorefrontTenant()
+    : await findStorefrontTenant(req.hostname)
   if (!selectedTenant) return res.json([])
 
   const rows = await prisma.category.findMany({
