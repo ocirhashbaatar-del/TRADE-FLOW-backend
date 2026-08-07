@@ -19,7 +19,7 @@ async function main() {
   const admin = await prisma.user.upsert({ where: { email: 'ocirhashbaatar@gmail.com' }, update: { tenantId: tenant.id, role: Role.ADMIN, platformAdmin: true }, create: { name: 'TradeFlow Admin', email: 'ocirhashbaatar@gmail.com', passwordHash: adminPasswordHash, role: Role.ADMIN, platformAdmin: true, tenant: 'TradeFlow', tenantId: tenant.id } })
   const transporter = await prisma.user.upsert({ where: { email: 'gardi@gmail.com' }, update: { tenantId: tenant.id, role: Role.TRANSPORTER }, create: { name: 'TradeFlow Тээвэрлэгч', email: 'gardi@gmail.com', passwordHash: transporterPasswordHash, role: Role.TRANSPORTER, tenant: 'TradeFlow', tenantId: tenant.id } })
   const vendor = await prisma.user.upsert({ where: { email: 'vendor@tradeflow.mn' }, update: { tenantId: tenant.id }, create: { name: 'Fresh Market', email: 'vendor@tradeflow.mn', passwordHash: adminPasswordHash, role: Role.VENDOR, tenant: 'TradeFlow', tenantId: tenant.id } })
-  const categories = await Promise.all(catalog.map((category) => prisma.category.upsert({ where: { slug: category.slug }, update: { name: category.name, image: category.image, tenantId: tenant.id }, create: { name: category.name, slug: category.slug, image: category.image, tenantId: tenant.id } })))
+  const categories = await Promise.all(catalog.map((category) => prisma.category.upsert({ where: { tenantId_slug: { tenantId: tenant.id, slug: category.slug } }, update: { name: category.name, image: category.image }, create: { name: category.name, slug: category.slug, image: category.image, tenantId: tenant.id } })))
   const warehouse = await prisma.warehouse.upsert({ where: { tenantId_code: { tenantId: tenant.id, code: 'MAIN' } }, update: {}, create: { tenantId: tenant.id, code: 'MAIN', name: 'Үндсэн агуулах' } })
 
   const products = catalog.flatMap((category, categoryIndex) => category.products.map((name, productIndex) => {
@@ -43,7 +43,7 @@ async function main() {
 
   for (const product of products) {
     const data = { ...product, tenantId: tenant.id, sku: product.slug.toUpperCase(), images: [product.image], vendorId: vendor.id }
-    const row = await prisma.product.upsert({ where: { slug: product.slug }, update: data, create: data })
+    const row = await prisma.product.upsert({ where: { tenantId_slug: { tenantId: tenant.id, slug: product.slug } }, update: data, create: data })
     await prisma.inventoryBalance.upsert({ where: { tenantId_warehouseId_productId_variantId: { tenantId: tenant.id, warehouseId: warehouse.id, productId: row.id, variantId: '' } }, update: { onHand: product.stock }, create: { tenantId: tenant.id, warehouseId: warehouse.id, productId: row.id, variantId: '', onHand: product.stock } })
   }
   await prisma.product.updateMany({

@@ -3,6 +3,7 @@ import { PurchaseOrderStatus, Role, StockMovementType } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
+import { syncProductStock } from '../lib/inventory.js'
 import PDFDocument from 'pdfkit'
 import { sendMail } from '../lib/services.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
@@ -70,7 +71,8 @@ router.post('/purchase-orders/:id/receive', async (req, res) => {
       const product = await tx.product.findFirstOrThrow({ where: { id: line.productId, tenantId } })
       const previousQty = Math.max(0, balance.onHand - accepted)
       const weightedCost = previousQty + accepted > 0 ? (Number(product.costPrice) * previousQty + Number(line.unitCost) * accepted) / (previousQty + accepted) : Number(line.unitCost)
-      await tx.product.update({ where: { id: product.id }, data: { costPrice: weightedCost, stock: { increment: accepted } } })
+      await tx.product.update({ where: { id: product.id }, data: { costPrice: weightedCost } })
+      await syncProductStock(tx, tenantId, product.id)
     }
     const allLines = await tx.purchaseOrderLine.findMany({ where: { purchaseOrderId: po.id, tenantId } })
     const receiptTotal = input.lines.reduce((sum, received) => { const line = allLines.find((row) => row.id === received.lineId); return sum + (line ? received.quantity * Number(line.unitCost) : 0) }, 0)

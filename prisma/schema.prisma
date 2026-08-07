@@ -65,6 +65,19 @@ enum ReservationStatus {
   EXPIRED
 }
 
+enum InventoryCountStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum StockTransferStatus {
+  DRAFT
+  SHIPPED
+  RECEIVED
+  CANCELLED
+}
+
 enum PurchaseOrderStatus {
   DRAFT
   SENT
@@ -151,19 +164,22 @@ model RefreshToken {
 
 model Category {
   id        String    @id @default(cuid())
-  name      String    @unique
-  slug      String    @unique
+  name      String
+  slug      String
   image     String?
   tenantId  String?
   parentId  String?
   products  Product[]
   createdAt DateTime  @default(now())
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, slug])
 }
 
 model Product {
   id           String         @id @default(cuid())
   name         String
-  slug         String         @unique
+  slug         String
   description  String
   price        Decimal        @db.Decimal(12, 2)
   compareAt    Decimal?       @db.Decimal(12, 2)
@@ -196,7 +212,8 @@ model Product {
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
-    @@unique([tenantId, sku])
+  @@unique([tenantId, sku])
+  @@unique([tenantId, slug])
   @@index([categoryId])
   @@index([vendorId])
   @@index([name])
@@ -336,16 +353,16 @@ model RolePermission {
 }
 
 model StaffInvitation {
-  id        String   @id @default(cuid())
-  tenantId  String
-  email     String
-  name      String
-  role      Role
-  tokenHash String   @unique
-  expiresAt DateTime
+  id         String    @id @default(cuid())
+  tenantId   String
+  email      String
+  name       String
+  role       Role
+  tokenHash  String    @unique
+  expiresAt  DateTime
   acceptedAt DateTime?
-  invitedBy String
-  createdAt DateTime @default(now())
+  invitedBy  String
+  createdAt  DateTime  @default(now())
 
   @@unique([tenantId, email])
   @@index([tenantId, createdAt])
@@ -515,6 +532,59 @@ model StockReservation {
   @@index([expiresAt, status])
 }
 
+model InventoryCount {
+  id          String               @id @default(cuid())
+  tenantId    String
+  warehouseId String
+  status      InventoryCountStatus @default(PENDING)
+  createdBy   String
+  reviewedBy  String?
+  reviewedAt  DateTime?
+  note        String?
+  lines       InventoryCountLine[]
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([tenantId, status, createdAt])
+}
+
+model InventoryCountLine {
+  id         String         @id @default(cuid())
+  countId    String
+  count      InventoryCount @relation(fields: [countId], references: [id], onDelete: Cascade)
+  productId  String
+  variantId  String?
+  systemQty  Int
+  countedQty Int
+  reason     String
+
+  @@unique([countId, productId, variantId])
+}
+
+model StockTransfer {
+  id               String              @id @default(cuid())
+  tenantId         String
+  reference        String
+  fromWarehouseId  String
+  toWarehouseId    String
+  productId        String
+  variantId        String?
+  quantity         Int
+  receivedQuantity Int?
+  reason           String
+  status           StockTransferStatus @default(DRAFT)
+  createdBy        String
+  shippedBy        String?
+  receivedBy       String?
+  shippedAt        DateTime?
+  receivedAt       DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, status, createdAt])
+}
+
 model Shipment {
   id           String    @id @default(cuid())
   tenantId     String
@@ -650,30 +720,30 @@ model PaymentAllocation {
 }
 
 model OtpChallenge {
-  id        String   @id @default(cuid())
-  phone     String
-  codeHash  String
-  expiresAt DateTime
+  id         String    @id @default(cuid())
+  phone      String
+  codeHash   String
+  expiresAt  DateTime
   verifiedAt DateTime?
-  attempts  Int      @default(0)
-  createdAt DateTime @default(now())
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
 
   @@index([phone, createdAt])
 }
 
 model QPayPayment {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   tenantId    String
   orderId     String
-  invoiceId   String   @unique
-  paymentId   String?  @unique
-  amount      Decimal  @db.Decimal(12, 2)
-  status      String   @default("PENDING")
+  invoiceId   String    @unique
+  paymentId   String?   @unique
+  amount      Decimal   @db.Decimal(12, 2)
+  status      String    @default("PENDING")
   qrData      String
   callbackRaw Json?
   paidAt      DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([tenantId, orderId])
 }

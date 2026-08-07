@@ -3,6 +3,7 @@ import { OrderStatus, ReservationStatus, Role, StockMovementType } from '@prisma
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
+import { releaseExpiredReservations, syncProductStock } from '../lib/inventory.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 
 const router = Router()
@@ -57,6 +58,7 @@ router.post('/shipments', async (req, res) => {
       if (!balance.count) throw Object.assign(new Error('Агуулахын үлдэгдэл хүрэлцэхгүй.'), { status: 409 })
       await tx.stockMovement.create({ data: { tenantId, warehouseId: reservation.warehouseId, productId: item.productId, type: StockMovementType.SALE, quantity: -shippingQuantity, reference: order.orderNumber, createdBy: req.user!.id } })
       await tx.stockReservation.update({ where: { id: reservation.id }, data: shippingQuantity === reservation.quantity ? { status: ReservationStatus.COMMITTED } : { quantity: { decrement: shippingQuantity } } })
+      await syncProductStock(tx, tenantId, item.productId)
     }
     await tx.order.update({ where: { id: order.id }, data: { status: partial ? OrderStatus.PROCESSING : OrderStatus.SHIPPED } })
     return created
@@ -66,16 +68,7 @@ router.post('/shipments', async (req, res) => {
 })
 
 router.post('/reservations/release-expired', async (req, res) => {
-  const tenantId = tenant(req)
-  const released = await prisma.$transaction(async (tx) => {
-    const rows = await tx.stockReservation.findMany({ where: { tenantId, status: ReservationStatus.ACTIVE, expiresAt: { lte: new Date() } } })
-    for (const row of rows) {
-      await tx.stockReservation.update({ where: { id: row.id }, data: { status: ReservationStatus.EXPIRED } })
-      await tx.inventoryBalance.updateMany({ where: { tenantId, warehouseId: row.warehouseId, productId: row.productId, reserved: { gte: row.quantity } }, data: { reserved: { decrement: row.quantity } } })
-      await tx.product.updateMany({ where: { tenantId, id: row.productId }, data: { stock: { increment: row.quantity } } })
-    }
-    return rows.length
-  })
+  const released = await releaseExpiredReservations(tenant(req))
   res.json({ released })
 })
 router.post('/returns', async (req, res) => {
@@ -96,9 +89,9 @@ router.post('/returns/:id/approve', async (req, res) => {
     const restock = request.condition === 'GOOD'
     if (restock) {
       await tx.inventoryBalance.upsert({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: request.warehouseId, productId: request.productId, variantId: '' } }, create: { tenantId, warehouseId: request.warehouseId, productId: request.productId, variantId: '', onHand: request.quantity }, update: { onHand: { increment: request.quantity } } })
-      await tx.product.updateMany({ where: { id: request.productId, tenantId }, data: { stock: { increment: request.quantity } } })
     }
     await tx.stockMovement.create({ data: { tenantId, warehouseId: request.warehouseId, productId: request.productId, type: restock ? StockMovementType.RETURN : StockMovementType.DISPOSAL, quantity: restock ? request.quantity : -request.quantity, reference: `RETURN:${request.id}`, reason: request.reason, createdBy: req.user!.id } })
+    if (restock) await syncProductStock(tx, tenantId, request.productId)
     return tx.returnRequest.update({ where: { id: request.id }, data: { status: 'APPROVED', restock, approvedBy: req.user!.id } })
   })
   await audit(req, 'APPROVE', 'ReturnRequest', row.id, undefined, row)

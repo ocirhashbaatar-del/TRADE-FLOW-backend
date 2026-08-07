@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import crypto from 'node:crypto'
-import { NotificationType } from '@prisma/client'
+import { NotificationType, ProductChannel } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { authenticate, requireTenant } from '../middleware/auth.js'
@@ -16,29 +16,34 @@ const schema = z.object({ items: z.array(z.object({ productId: z.string(), quant
 router.post('/', async (req, res) => {
   const input = schema.parse(req.body)
   const tenantId = req.user!.tenantId!
-  const products = await prisma.product.findMany({ where: { id: { in: input.items.map((item) => item.productId) }, tenantId, active: true } })
+  const allowedChannels = input.channel === 'B2B' ? [ProductChannel.BOTH, ProductChannel.B2B] : input.channel === 'B2C' ? [ProductChannel.BOTH, ProductChannel.B2C] : [ProductChannel.BOTH, ProductChannel.B2B, ProductChannel.B2C]
+  const products = await prisma.product.findMany({ where: { id: { in: input.items.map((item) => item.productId) }, tenantId, active: true, channel: { in: allowedChannels } } })
   if (products.length !== input.items.length) return res.status(400).json({ message: 'Зарим бүтээгдэхүүн олдсонгүй.' })
   const deliveryFee = 180
   const order = await prisma.$transaction(async (tx) => {
     const requestedCustomer = input.customerId ? await tx.customerAccount.findFirst({ where: { id: input.customerId, tenantId, active: true } }) : null
     if (input.customerId && !['ADMIN', 'MANAGER', 'EMPLOYEE'].includes(req.user!.role)) throw Object.assign(new Error('Гар захиалга үүсгэх эрхгүй.'), { status: 403 })
-    const priced = await Promise.all(input.items.map(async (item) => ({ ...item, ...(await resolvePrice(tx, { tenantId, productId: item.productId, quantity: item.quantity, customerId: requestedCustomer?.id })) })))
+    const customer = input.channel === 'B2B' ? requestedCustomer ?? await tx.customerAccount.findFirst({ where: { tenantId, userId: req.user!.id, active: true } }) : null
+    const priced = await Promise.all(input.items.map(async (item) => ({ ...item, ...(await resolvePrice(tx, { tenantId, productId: item.productId, quantity: item.quantity, customerId: customer?.id, groupCode: customer?.groupCode ?? undefined })) })))
     const subtotal = priced.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
     const total = subtotal + deliveryFee
-    const customer = input.channel === 'B2B' ? requestedCustomer ?? await tx.customerAccount.findFirst({ where: { tenantId, userId: req.user!.id, active: true } }) : null
     if (input.channel === 'B2B' && (!customer || Number(customer.creditUsed) + total > Number(customer.creditLimit))) throw Object.assign(new Error('B2B зээлийн хязгаар хүрэлцэхгүй.'), { status: 409 })
+    const reservations: Array<{ productId: string; warehouseId: string; quantity: number }> = []
     for (const item of priced) {
-      const claimed = await tx.product.updateMany({ where: { id: item.productId, tenantId, active: true, stock: { gte: item.quantity } }, data: { stock: { decrement: item.quantity } } })
-      if (claimed.count !== 1) throw Object.assign(new Error('Үлдэгдэл хүрэлцэхгүй эсвэл өөр захиалгад нөөцлөгдсөн.'), { status: 409 })
+      const balances = await tx.inventoryBalance.findMany({ where: { tenantId, productId: item.productId }, orderBy: { updatedAt: 'asc' } })
+      const balance = balances.find((row) => row.onHand - row.reserved >= item.quantity)
+      if (!balance) throw Object.assign(new Error('Үлдэгдэл хүрэлцэхгүй эсвэл өөр захиалгад нөөцлөгдсөн.'), { status: 409 })
+      const claimed = await tx.inventoryBalance.updateMany({
+        where: { id: balance.id, tenantId, reserved: balance.reserved, onHand: { gte: balance.reserved + item.quantity } },
+        data: { reserved: { increment: item.quantity } },
+      })
+      if (claimed.count !== 1) throw Object.assign(new Error('Үлдэгдлийг өөр захиалга түрүүлж нөөцөлсөн байна. Дахин оролдоно уу.'), { status: 409 })
+      reservations.push({ productId: item.productId, warehouseId: balance.warehouseId, quantity: item.quantity })
     }
     const created = await tx.order.create({ data: { orderNumber: `TF-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`, tenantId, channel: input.channel, userId: customer?.userId ?? req.user!.id, subtotal, deliveryFee, total, recipientName: input.recipientName, phone: input.phone, city: input.city, district: input.district, address: input.address, items: { create: priced.map((item) => ({ productId: item.productId, quantity: item.quantity, unitPrice: item.price })) } }, include: { items: { include: { product: true } } } })
     if (customer) await tx.customerAccount.update({ where: { id: customer.id }, data: { creditUsed: { increment: total } } })
-    const warehouse = await tx.warehouse.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: 'asc' } })
-    if (warehouse) {
-      for (const item of priced) {
-        await tx.stockReservation.create({ data: { tenantId, orderId: created.id, warehouseId: warehouse.id, productId: item.productId, quantity: item.quantity, expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000) } })
-        await tx.inventoryBalance.updateMany({ where: { tenantId, warehouseId: warehouse.id, productId: item.productId }, data: { reserved: { increment: item.quantity } } })
-      }
+    for (const reservation of reservations) {
+      await tx.stockReservation.create({ data: { tenantId, orderId: created.id, ...reservation, expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000) } })
     }
     return created
   }, { isolationLevel: 'Serializable' })
