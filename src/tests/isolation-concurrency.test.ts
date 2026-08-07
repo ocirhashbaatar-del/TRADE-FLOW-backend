@@ -19,6 +19,11 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  const orderIds = (await prisma.order.findMany({ where: { tenantId: { in: ids.tenants } }, select: { id: true } })).map((row) => row.id)
+  await prisma.orderStatusHistory.deleteMany({ where: { orderId: { in: orderIds } } })
+  await prisma.stockReservation.deleteMany({ where: { orderId: { in: orderIds } } })
+  await prisma.orderItem.deleteMany({ where: { orderId: { in: orderIds } } })
+  await prisma.order.deleteMany({ where: { id: { in: orderIds } } })
   await prisma.rolePermission.deleteMany({ where: { tenantId: { in: ids.tenants } } })
   await prisma.inventoryBalance.deleteMany({ where: { warehouseId: { in: ids.warehouses } } })
   await prisma.warehouse.deleteMany({ where: { id: { in: ids.warehouses } } })
@@ -38,6 +43,11 @@ describe('tenant isolation', () => {
   it('does not expose a product detail through another tenant storefront', async () => {
     await request(app).get(`/api/v1/products/${ids.products[1]}?tenant=test-${stamp}-a`).expect(404)
   })
+  it('does not expose cost price through public product APIs', async () => {
+    const list = await request(app).get(`/api/v1/products?tenant=test-${stamp}-a`).expect(200)
+    const detail = await request(app).get(`/api/v1/products/${ids.products[0]}?tenant=test-${stamp}-a`).expect(200)
+    expect(list.body[0]).not.toHaveProperty('costPrice'); expect(detail.body).not.toHaveProperty('costPrice')
+  })
   it('enforces a stored RolePermission over the hardcoded fallback role', async () => {
     await prisma.rolePermission.create({ data: { tenantId: ids.tenants[0]!, role: 'VENDOR', module: 'catalog', canRead: false } })
     const token = signAccessToken({ id: ids.users[0]!, email: `vendor-${stamp}-a@test.local`, role: 'VENDOR', tenantId: ids.tenants[0]! })
@@ -46,11 +56,15 @@ describe('tenant isolation', () => {
 })
 
 describe('inventory concurrency', () => {
-  it('allows exactly one of 50 reservations for the final available unit without reducing onHand', async () => {
-    const results = await Promise.all(Array.from({ length: 50 }, () => prisma.inventoryBalance.updateMany({ where: { tenantId: ids.tenants[0], warehouseId: ids.warehouses[0], productId: ids.products[0], variantId: '', onHand: { gte: 1 }, reserved: 0 }, data: { reserved: { increment: 1 } } })))
-    expect(results.reduce((sum, row) => sum + row.count, 0)).toBe(1)
+  it('allows exactly one of 50 HTTP orders for the final unit and preserves physical stock', async () => {
+    const token = signAccessToken({ id: ids.users[0]!, email: `vendor-${stamp}-a@test.local`, role: 'VENDOR', tenantId: ids.tenants[0]! })
+    const payload = { items: [{ productId: ids.products[0], quantity: 1 }], recipientName: 'Concurrency User', phone: '99112233', city: 'Ulaanbaatar', district: 'Sukhbaatar', address: 'Test address', channel: 'B2C' }
+    const responses = await Promise.all(Array.from({ length: 50 }, () => request(app).post('/api/v1/orders').set('Authorization', `Bearer ${token}`).send(payload)))
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1)
+    expect(responses.filter((response) => response.status === 409)).toHaveLength(49)
     const balance = await prisma.inventoryBalance.findFirstOrThrow({ where: { tenantId: ids.tenants[0], productId: ids.products[0] } })
-    expect(balance.onHand).toBe(1)
-    expect(balance.reserved).toBe(1)
+    expect(balance.onHand).toBe(1); expect(balance.reserved).toBe(1)
+    const order = await prisma.order.findFirstOrThrow({ where: { tenantId: ids.tenants[0] }, include: { items: true } })
+    expect(order.items[0]?.appliedPriceSource).toBe('RETAIL')
   })
 })
