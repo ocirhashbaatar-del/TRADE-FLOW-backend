@@ -11,6 +11,7 @@ import { sendMail } from '../lib/services.js'
 import { env } from '../config/env.js'
 import { redis } from '../lib/redis.js'
 import { findStorefrontTenant } from '../utils/storefront-tenant.js'
+import { assertSubscriptionCapacity } from '../lib/subscription.js'
 
 const router = Router()
 const credentials = z.object({ email: z.email(), password: z.string().min(8) })
@@ -65,6 +66,8 @@ router.post('/accept-invite', async (req, res) => {
   const invitation = await prisma.staffInvitation.findUnique({ where: { tokenHash: hashToken(input.token) } })
   if (!invitation || invitation.acceptedAt || invitation.expiresAt < new Date()) return res.status(400).json({ message: 'Урилга хүчингүй эсвэл хугацаа дууссан.' })
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: invitation.tenantId } })
+  const existingInviteUser = await prisma.user.findUnique({ where: { email: invitation.email } })
+  if (!existingInviteUser) await prisma.$transaction((tx) => assertSubscriptionCapacity(tx, tenant.id, 'users'))
   const user = await prisma.user.upsert({ where: { email: invitation.email }, update: { name: invitation.name, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash: await bcrypt.hash(input.password, 12) }, create: { name: invitation.name, email: invitation.email, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash: await bcrypt.hash(input.password, 12), emailVerified: new Date() } })
   await prisma.refreshToken.deleteMany({ where: { userId: user.id } })
   await prisma.staffInvitation.update({ where: { id: invitation.id }, data: { acceptedAt: new Date() } })

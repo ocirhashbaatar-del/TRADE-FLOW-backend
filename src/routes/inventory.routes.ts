@@ -5,6 +5,7 @@ import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
 import { syncProductStock } from '../lib/inventory.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
+import { assertSubscriptionCapacity } from '../lib/subscription.js'
 
 const router = Router()
 router.use(authenticate, requireTenant)
@@ -14,6 +15,7 @@ router.get('/warehouses', async (req, res) => {
   res.json(await prisma.warehouse.findMany({ where: { tenantId: req.user!.tenantId! }, orderBy: { name: 'asc' } }))
 })
 router.post('/warehouses', staff, async (req, res) => {
+  await prisma.$transaction((tx) => assertSubscriptionCapacity(tx, req.user!.tenantId!, 'warehouses'))
   const input = z.object({ code: z.string().min(1), name: z.string().min(2), address: z.string().optional(), type: z.string().default('WAREHOUSE') }).parse(req.body)
   const row = await prisma.warehouse.create({ data: { ...input, tenantId: req.user!.tenantId! } })
   await audit(req, 'CREATE', 'Warehouse', row.id, undefined, row)

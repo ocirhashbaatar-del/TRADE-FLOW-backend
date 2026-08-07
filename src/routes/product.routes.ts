@@ -7,6 +7,7 @@ import { cacheDelete, cacheGet, cacheSet } from '../lib/redis.js'
 import { findStorefrontTenant } from '../utils/storefront-tenant.js'
 import { resolvePrice } from '../lib/price-resolver.js'
 import { tenantWhere } from '../lib/tenant-scope.js'
+import { assertSubscriptionCapacity } from '../lib/subscription.js'
 
 const router = Router()
 const schema = z.object({ sku: z.string().trim().min(2).max(64).transform((value) => value.toUpperCase()), name: z.string().min(2), slug: z.string().min(2), description: z.string().min(5), price: z.coerce.number().positive(), compareAt: z.coerce.number().positive().optional(), stock: z.coerce.number().int().nonnegative(), image: z.string(), images: z.array(z.string()).default([]), tags: z.array(z.string()).default([]), featured: z.boolean().default(false), active: z.boolean().default(true), trackBatch: z.boolean().default(false), trackExpiry: z.boolean().default(false), categoryId: z.string(), vendorId: z.string().optional() }).refine((data) => !data.trackExpiry || data.trackBatch, { message: 'Expiry tracking ашиглах бол batch tracking мөн идэвхтэй байна.', path: ['trackExpiry'] })
@@ -57,6 +58,7 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
   if (!req.user!.tenantId) return res.status(403).json({ message: 'Tenant шаардлагатай.' })
   const data = schema.and(extendedFields).parse(req.body), tenantId = req.user!.tenantId
   const product = await prisma.$transaction(async (tx) => {
+    await assertSubscriptionCapacity(tx, tenantId, 'products')
     const category = await tx.category.findFirst({ where: { id: data.categoryId, tenantId } })
     if (!category) throw Object.assign(new Error('Ангилал буруу.'), { status: 400 })
     const duplicate = await tx.product.findFirst({ where: { tenantId, sku: data.sku } })
