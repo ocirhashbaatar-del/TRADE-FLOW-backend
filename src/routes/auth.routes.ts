@@ -16,6 +16,14 @@ const credentials = z.object({ email: z.email(), password: z.string().min(8) })
 const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID)
 const publicUser = (user: { id: string; name: string; email: string; role: string; tenant: string; phone: string | null; avatar: string | null; emailVerified: Date | null; platformAdmin: boolean }) => ({ id: user.id, name: user.name, email: user.email, role: user.role[0] + user.role.slice(1).toLowerCase(), tenant: user.tenant, phone: user.phone ?? undefined, avatar: user.avatar ?? undefined, emailVerified: Boolean(user.emailVerified), platformAdmin: user.platformAdmin })
 const randomToken = () => crypto.randomBytes(32).toString('hex')
+const oauthErrorCode = (error: unknown) => {
+  const message = error instanceof Error ? error.message : ''
+  if (message.includes('configuration missing')) return 'not_configured'
+  if (message.includes('state')) return 'invalid_state'
+  if (message.includes('Redis')) return 'temporarily_unavailable'
+  if (message.includes('Facebook')) return 'facebook_failed'
+  return 'oauth_failed'
+}
 
 router.post('/guest', async (req, res) => {
   const { guestId } = z.object({ guestId: z.string().min(8).max(100) }).parse(req.body)
@@ -138,7 +146,7 @@ router.get('/oauth/:provider/start', async (req, res) => {
     ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&response_type=code&scope=openid%20email%20profile&access_type=offline&prompt=select_account%20consent&state=${encodeURIComponent(state)}`
     : provider === 'github'
       ? `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&scope=read:user%20user:email&state=${encodeURIComponent(state)}`
-      : `https://www.facebook.com/dialog/oauth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&scope=email,public_profile&state=${encodeURIComponent(state)}`
+      : `https://www.facebook.com/dialog/oauth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(config.callback)}&response_type=code&scope=email,public_profile&state=${encodeURIComponent(state)}`
   res.redirect(url)
 })
 
@@ -174,12 +182,20 @@ router.get('/oauth/:provider/callback', async (req, res) => {
     } else {
       if (!env.FACEBOOK_CLIENT_ID || !env.FACEBOOK_CLIENT_SECRET) throw new Error('Facebook OAuth configuration missing')
       const callback = `${env.BACKEND_PUBLIC_URL}/api/v1/auth/oauth/facebook/callback`
-      const tokenUrl = `https://graph.facebook.com/oauth/access_token?client_id=${encodeURIComponent(env.FACEBOOK_CLIENT_ID)}&client_secret=${encodeURIComponent(env.FACEBOOK_CLIENT_SECRET)}&redirect_uri=${encodeURIComponent(callback)}&code=${encodeURIComponent(code)}`
-      const tokenData = await (await fetch(tokenUrl)).json() as { access_token?: string }
-      if (!tokenData.access_token) throw new Error('Facebook token exchange failed')
-      const facebook = await (await fetch(`https://graph.facebook.com/me?fields=id,name,email,picture.type(large)&access_token=${encodeURIComponent(tokenData.access_token)}`)).json() as { id: string; name: string; email?: string; picture?: { data?: { url?: string } } }
-      if (!facebook.email) throw new Error('Facebook email permission is required')
-      profile = { id: facebook.id, email: facebook.email, name: facebook.name, avatar: facebook.picture?.data?.url }
+      const tokenResponse = await fetch('https://graph.facebook.com/oauth/access_token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_id: env.FACEBOOK_CLIENT_ID, client_secret: env.FACEBOOK_CLIENT_SECRET, redirect_uri: callback, code }),
+      })
+      const tokenData = await tokenResponse.json() as { access_token?: string; error?: { message?: string } }
+      if (!tokenResponse.ok || !tokenData.access_token) throw new Error(`Facebook token exchange failed: ${tokenData.error?.message ?? tokenResponse.status}`)
+      const proof = crypto.createHmac('sha256', env.FACEBOOK_CLIENT_SECRET).update(tokenData.access_token).digest('hex')
+      const profileUrl = new URL('https://graph.facebook.com/me')
+      profileUrl.search = new URLSearchParams({ fields: 'id,name,email,picture.type(large)', appsecret_proof: proof }).toString()
+      const profileResponse = await fetch(profileUrl, { headers: { Authorization: `Bearer ${tokenData.access_token}` } })
+      const facebook = await profileResponse.json() as { id?: string; name?: string; email?: string; picture?: { data?: { url?: string } }; error?: { message?: string } }
+      if (!profileResponse.ok || !facebook.id || !facebook.name) throw new Error(`Facebook profile failed: ${facebook.error?.message ?? profileResponse.status}`)
+      profile = { id: facebook.id, email: facebook.email ?? `facebook-${facebook.id}@oauth.tradeflow.local`, name: facebook.name, avatar: facebook.picture?.data?.url }
     }
     const user = await findOrCreateOAuthUser(provider, profile.id, profile)
     const tokens = await issueTokens(user)
@@ -189,7 +205,9 @@ router.get('/oauth/:provider/callback', async (req, res) => {
     res.redirect(`${env.AUTH_CALLBACK_URL}?code=${encodeURIComponent(exchangeCode)}`)
   } catch (error) {
     console.error(error)
-    res.redirect(`${env.AUTH_CALLBACK_URL}?error=oauth_failed`)
+    const callbackUrl = new URL(env.AUTH_CALLBACK_URL)
+    callbackUrl.searchParams.set('error', oauthErrorCode(error))
+    res.redirect(callbackUrl.toString())
   }
 })
 
@@ -229,5 +247,12 @@ router.post('/reset-password', async (req, res) => {
   if (!record || record.usedAt || record.expiresAt < new Date()) return res.status(400).json({ message: 'Сэргээх холбоос хүчингүй эсвэл хугацаа дууссан.' })
   await prisma.$transaction([prisma.user.update({ where: { id: record.userId }, data: { passwordHash: await bcrypt.hash(input.password, 12) } }), prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }), prisma.refreshToken.deleteMany({ where: { userId: record.userId } })])
   res.json({ message: 'Нууц үг амжилттай шинэчлэгдлээ.' })
+})
+
+router.post('/seed-tenant', async (req, res) => {
+  const existing = await prisma.tenant.findFirst({ where: { active: true } })
+  if (existing) return res.json({ message: 'already exists', tenant: existing })
+  const tenant = await prisma.tenant.create({ data: { name: 'FreshFlow', slug: 'freshflow', active: true } })
+  res.json({ message: 'created', tenant })
 })
 export default router
