@@ -3,14 +3,14 @@ import { PurchaseOrderStatus, Role, StockMovementType } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
-import { syncProductStock } from '../lib/inventory.js'
+import { applyStockMovement } from '../lib/inventory.js'
 import PDFDocument from 'pdfkit'
 import { sendMail } from '../lib/services.js'
-import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
+import { authenticate, authorizePermission, requireTenant } from '../middleware/auth.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
 
 const router = Router()
-router.use(authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR))
+router.use(authenticate, requireTenant, authorizePermission('procurement', 'auto', Role.ADMIN, Role.MANAGER, Role.VENDOR))
 const tenant = (req: Express.Request) => req.user!.tenantId!
 async function purchaseOrderPdf(id: string, tenantId: string) {
   const po = await prisma.purchaseOrder.findFirst({ where: { id, tenantId } })
@@ -90,15 +90,14 @@ router.post('/purchase-orders/:id/receive', async (req, res) => {
       if (received.expiresAt && received.expiresAt <= new Date()) throw Object.assign(new Error(`${product.name}: хугацаа дууссан бараа хүлээн авах боломжгүй.`), { status: 400 })
       const accepted = received.quantity - received.damaged
       const expected = line.orderedQty - line.receivedQty
+      const previousBalance = await tx.inventoryBalance.findUnique({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '' } } })
       await tx.purchaseOrderLine.update({ where: { id: line.id }, data: { receivedQty: { increment: received.quantity } } })
       await tx.goodsReceiptLine.create({ data: { tenantId, goodsReceiptId: receipt.id, purchaseOrderLineId: line.id, productId: line.productId, expectedQuantity: expected, receivedQuantity: received.quantity, acceptedQuantity: accepted, damagedQuantity: received.damaged, discrepancyQuantity: received.quantity - expected, batchNumber: received.batchNumber, expiresAt: received.expiresAt, unitCost: line.unitCost } })
-      const balance = await tx.inventoryBalance.upsert({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '' } }, create: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId ?? '', onHand: accepted }, update: { onHand: { increment: accepted } } })
-      await tx.stockMovement.create({ data: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, type: StockMovementType.RECEIPT, quantity: accepted, unitCost: line.unitCost, reference: po.code, createdBy: req.user!.id } })
+      await applyStockMovement(tx, { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, type: StockMovementType.RECEIPT, quantity: accepted, unitCost: Number(line.unitCost), reference: po.code, createdBy: req.user!.id })
       if (received.batchNumber) await tx.stockBatch.upsert({ where: { tenantId_warehouseId_productId_batchNumber: { tenantId, warehouseId: po.warehouseId, productId: line.productId, batchNumber: received.batchNumber } }, create: { tenantId, warehouseId: po.warehouseId, productId: line.productId, variantId: line.variantId, batchNumber: received.batchNumber, expiresAt: received.expiresAt, quantity: accepted }, update: { quantity: { increment: accepted }, expiresAt: received.expiresAt } })
-      const previousQty = Math.max(0, balance.onHand - accepted)
+      const previousQty = previousBalance?.onHand ?? 0
       const weightedCost = previousQty + accepted > 0 ? (Number(product.costPrice) * previousQty + Number(line.unitCost) * accepted) / (previousQty + accepted) : Number(line.unitCost)
       await tx.product.update({ where: { id: product.id }, data: { costPrice: weightedCost } })
-      await syncProductStock(tx, tenantId, product.id)
       await tx.productSupplier.updateMany({ where: { tenantId, productId: product.id, supplierId: po.supplierId }, data: { lastPurchasedAt: new Date(), unitCost: line.unitCost } })
     }
     const allLines = await tx.purchaseOrderLine.findMany({ where: { purchaseOrderId: po.id, tenantId } })
@@ -115,5 +114,22 @@ router.post('/purchase-orders/:id/receive', async (req, res) => {
 router.get('/purchase-orders/:id/pdf', async (req, res) => { const result = await purchaseOrderPdf(String(req.params.id), tenant(req)); if (!result) return res.status(404).json({ message: 'PO олдсонгүй.' }); res.type('application/pdf').attachment(`${result.po.code}.pdf`).send(result.buffer) })
 router.post('/purchase-orders/:id/email', async (req, res) => { const result = await purchaseOrderPdf(String(req.params.id), tenant(req)); if (!result?.supplier?.email) return res.status(404).json({ message: 'Нийлүүлэгчийн имэйл олдсонгүй.' }); await sendMail(result.supplier.email, `${result.po.code} худалдан авалтын захиалга`, '<p>Хавсралтаар худалдан авалтын захиалгыг илгээлээ.</p>', [{ filename: `${result.po.code}.pdf`, content: result.buffer, contentType: 'application/pdf' }]); res.json({ message: 'PO имэйлээр илгээгдлээ.' }) })
 router.get('/payables', async (req, res) => res.json(await prisma.supplierPayable.findMany({ where: { tenantId: tenant(req) }, orderBy: { createdAt: 'desc' } })))
-router.post('/payables/:id/pay', async (req, res) => { const { amount } = z.object({ amount: z.number().positive() }).parse(req.body); const current = await prisma.supplierPayable.findFirst({ where: { id: String(req.params.id), tenantId: tenant(req) } }); if (!current || Number(current.paidAmount) + amount > Number(current.amount)) return res.status(409).json({ message: 'Төлбөрийн дүн буруу.' }); const row = await prisma.supplierPayable.update({ where: { id: current.id }, data: { paidAmount: { increment: amount }, status: Number(current.paidAmount) + amount >= Number(current.amount) ? 'PAID' : 'PARTIAL' } }); res.json(row) })
+router.post('/payables/:id/pay', async (req, res) => {
+  const input = z.object({ amount: z.number().positive(), method: z.enum(['BANK', 'CASH']).default('BANK'), reference: z.string().min(3), paidAt: z.coerce.date().optional() }).parse(req.body)
+  const tenantId = tenant(req)
+  const result = await prisma.$transaction(async (tx) => {
+    await assertPeriodOpen(tx, tenantId, input.paidAt ?? new Date())
+    const duplicate = await tx.supplierPayment.findUnique({ where: { tenantId_reference: { tenantId, reference: input.reference } } })
+    if (duplicate) return { payment: duplicate, idempotent: true }
+    const current = await tx.supplierPayable.findFirst({ where: { id: String(req.params.id), tenantId } })
+    if (!current || Number(current.paidAmount) + input.amount > Number(current.amount)) throw Object.assign(new Error('Төлбөрийн дүн буруу.'), { status: 409 })
+    const payment = await tx.supplierPayment.create({ data: { tenantId, supplierId: current.supplierId, supplierPayableId: current.id, amount: input.amount, method: input.method, reference: input.reference, paidAt: input.paidAt, recordedBy: req.user!.id } })
+    const payable = await tx.supplierPayable.update({ where: { id: current.id }, data: { paidAmount: { increment: input.amount }, status: Number(current.paidAmount) + input.amount >= Number(current.amount) ? 'PAID' : 'PARTIAL' } })
+    const period = payment.paidAt.toISOString().slice(0, 7)
+    await tx.financialEntry.createMany({ data: [{ tenantId, account: 'ACCOUNTS_PAYABLE', reference: input.reference, debit: input.amount, period, createdBy: req.user!.id }, { tenantId, account: input.method, reference: input.reference, credit: input.amount, period, createdBy: req.user!.id }] })
+    return { payment, payable, idempotent: false }
+  }, { isolationLevel: 'Serializable' })
+  await audit(req, 'PAY', 'SupplierPayable', String(req.params.id), undefined, result)
+  res.status(result.idempotent ? 200 : 201).json(result)
+})
 export default router

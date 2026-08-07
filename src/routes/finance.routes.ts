@@ -2,14 +2,15 @@ import { Router } from 'express'
 import { Role } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
-import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
+import { authenticate, authorizePermission, requireTenant } from '../middleware/auth.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
 import { postPayment } from '../lib/payment-posting.js'
 import PDFDocument from 'pdfkit'
 import { sendMail } from '../lib/services.js'
+import { audit } from '../lib/audit.js'
 
 const router = Router()
-router.use(authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.ACCOUNTANT))
+router.use(authenticate, requireTenant, authorizePermission('finance', 'auto', Role.ADMIN, Role.MANAGER, Role.ACCOUNTANT))
 const tid = (req: Express.Request) => req.user!.tenantId!
 
 router.get('/invoices', async (req, res) => {
@@ -74,7 +75,18 @@ router.get('/receivables/aging', async (req, res) => {
   res.json({ buckets, total: Object.values(buckets).reduce((a, b) => a + b, 0) })
 })
 router.get('/ledger', async (req, res) => res.json(await prisma.financialEntry.findMany({ where: { tenantId: tid(req) }, orderBy: { createdAt: 'desc' }, take: 500 })))
-router.post('/periods/:period/lock', async (req, res) => res.status(201).json(await prisma.periodLock.create({ data: { tenantId: tid(req), period: z.string().regex(/^\d{4}-\d{2}$/).parse(req.params.period), lockedBy: req.user!.id } })))
+router.post('/ledger/:id/reverse', async (req, res) => {
+  const input = z.object({ reason: z.string().min(3) }).parse(req.body), tenantId = tid(req)
+  const row = await prisma.$transaction(async (tx) => {
+    const original = await tx.financialEntry.findFirst({ where: { id: String(req.params.id), tenantId } })
+    if (!original) throw Object.assign(new Error('Санхүүгийн бичилт олдсонгүй.'), { status: 404 })
+    if (await tx.financialEntry.findFirst({ where: { tenantId, reversesId: original.id } })) throw Object.assign(new Error('Энэ бичилт аль хэдийн буцаагдсан.'), { status: 409 })
+    const period = await assertPeriodOpen(tx, tenantId)
+    return tx.financialEntry.create({ data: { tenantId, account: original.account, reference: `REV:${original.reference}:${input.reason}`, debit: original.credit, credit: original.debit, period, kind: 'REVERSAL', reversesId: original.id, createdBy: req.user!.id } })
+  })
+  res.status(201).json(row)
+})
+router.post('/periods/:period/lock', async (req, res) => { const period = z.string().regex(/^\d{4}-\d{2}$/).parse(req.params.period); const row = await prisma.periodLock.create({ data: { tenantId: tid(req), period, lockedBy: req.user!.id } }); await audit(req, 'LOCK', 'PeriodLock', row.id, undefined, row); res.status(201).json(row) })
 router.get('/reconciliation/:date', async (req, res) => {
   const date = z.coerce.date().parse(req.params.date), start = new Date(date); start.setHours(0, 0, 0, 0); const end = new Date(start.getTime() + 86400000)
   const [payments, ledger] = await Promise.all([prisma.paymentRecord.aggregate({ where: { tenantId: tid(req), paidAt: { gte: start, lt: end } }, _sum: { amount: true } }), prisma.financialEntry.aggregate({ where: { tenantId: tid(req), account: { in: ['BANK', 'CASH'] }, createdAt: { gte: start, lt: end } }, _sum: { debit: true } })])

@@ -237,13 +237,14 @@ model CartItem {
   id        String   @id @default(cuid())
   userId    String
   productId String
+  variantId String   @default("")
   quantity  Int      @default(1)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([userId, productId])
+  @@unique([userId, productId, variantId])
   @@index([userId])
 }
 
@@ -346,6 +347,7 @@ model OrderItem {
   orderId             String
   order               Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId           String
+  variantId           String          @default("")
   product             Product         @relation(fields: [productId], references: [id])
   quantity            Int
   unitPrice           Decimal         @db.Decimal(12, 2)
@@ -355,7 +357,7 @@ model OrderItem {
   backorderedQuantity Int             @default(0)
   backorderStatus     BackorderStatus @default(NONE)
 
-  @@unique([orderId, productId])
+  @@unique([orderId, productId, variantId])
 }
 
 model OrderStatusHistory {
@@ -481,6 +483,7 @@ model ProductVariant {
   barcode   String?
   name      String
   options   Json
+  price     Decimal? @db.Decimal(12, 2)
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -493,6 +496,7 @@ model PriceRule {
   id          String    @id @default(cuid())
   tenantId    String
   productId   String
+  variantId   String?
   customerId  String?
   groupCode   String?
   minQuantity Int       @default(1)
@@ -504,7 +508,7 @@ model PriceRule {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  @@index([tenantId, productId, active])
+  @@index([tenantId, productId, variantId, active])
 }
 
 model Promotion {
@@ -700,6 +704,7 @@ model ShipmentLine {
   shipmentId  String
   orderItemId String
   productId   String
+  variantId   String   @default("")
   batchId     String?
   quantity    Int
   createdAt   DateTime @default(now())
@@ -971,6 +976,8 @@ model FinancialEntry {
   tenantId  String
   account   String
   reference String
+  kind      String   @default("POSTING")
+  reversesId String?
   debit     Decimal  @default(0) @db.Decimal(12, 2)
   credit    Decimal  @default(0) @db.Decimal(12, 2)
   period    String
@@ -978,6 +985,7 @@ model FinancialEntry {
   createdAt DateTime @default(now())
 
   @@index([tenantId, period])
+  @@index([tenantId, reversesId])
 }
 
 model PeriodLock {
@@ -1029,6 +1037,7 @@ model ReturnRequest {
   tenantId     String
   orderId      String
   productId    String
+  variantId    String   @default("")
   warehouseId  String
   quantity     Int
   reason       String
@@ -1058,4 +1067,20 @@ model SupplierPayable {
   updatedAt       DateTime  @updatedAt
 
   @@index([tenantId, supplierId, status])
+}
+
+model SupplierPayment {
+  id                String   @id @default(cuid())
+  tenantId          String
+  supplierId        String
+  supplierPayableId String
+  amount            Decimal  @db.Decimal(12, 2)
+  method            String
+  reference         String
+  paidAt            DateTime @default(now())
+  recordedBy        String
+  createdAt         DateTime @default(now())
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, supplierId, paidAt])
 }

@@ -42,6 +42,17 @@ export const authorize = (...roles: Role[]) => async (req: Request, res: Respons
   return roles.includes(req.user.role) ? next() : res.status(403).json({ message: 'Энэ үйлдлийг хийх эрхгүй.' })
 }
 
+export const authorizePermission = (module: string, action: 'auto' | 'canRead' | 'canCreate' | 'canUpdate' | 'canDelete', ...fallbackRoles: Role[]) => async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user) return res.status(403).json({ message: 'Энэ үйлдлийг хийх эрхгүй.' })
+  if (req.user.role === 'ADMIN') return next()
+  if (req.user.tenantId) {
+    const permission = await prisma.rolePermission.findUnique({ where: { tenantId_role_module: { tenantId: req.user.tenantId, role: req.user.role, module } } })
+    const resolvedAction = action === 'auto' ? permissionAction(req) : action
+    if (permission) return permission[resolvedAction] ? next() : res.status(403).json({ message: `${module} хэсгийн ${resolvedAction} эрхгүй.` })
+  }
+  return fallbackRoles.includes(req.user.role) ? next() : res.status(403).json({ message: 'Энэ үйлдлийг хийх эрхгүй.' })
+}
+
 export function optionalAuthenticate(req: Request, _res: Response, next: NextFunction) {
   const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
   if (token) {

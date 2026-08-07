@@ -8,6 +8,7 @@ import { sendMail } from '../lib/services.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 import { hashToken } from '../utils/auth.js'
 import { resolveTxt } from 'node:dns/promises'
+import { jobQueueHealth } from '../lib/job-queue.js'
 
 const router = Router()
 router.use(authenticate)
@@ -41,7 +42,7 @@ router.patch('/platform/tenants/:id', async (req, res) => { if (!await assertPla
 router.get('/platform/health', async (req, res) => {
   if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
   const [tenants, users, products, orders, activeTenants] = await Promise.all([prisma.tenant.count(), prisma.user.count(), prisma.product.count(), prisma.order.count(), prisma.tenant.count({ where: { active: true } })])
-  res.json({ status: 'healthy', database: 'connected', tenants, activeTenants, users, products, orders, uptimeSeconds: Math.floor(process.uptime()), memoryMb: Math.round(process.memoryUsage().rss / 1048576), plans: planRules })
+  res.json({ status: 'healthy', database: 'connected', queue: await jobQueueHealth(), tenants, activeTenants, users, products, orders, uptimeSeconds: Math.floor(process.uptime()), memoryMb: Math.round(process.memoryUsage().rss / 1048576), plans: planRules })
 })
 router.get('/platform/usage', async (req, res) => {
   if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
@@ -57,6 +58,12 @@ router.post('/platform/tenants/:id/domain/verify', async (req, res) => {
   const tenant = await prisma.tenant.findUnique({ where: { id: String(req.params.id) } }); if (!tenant?.domain || !tenant.domainVerificationToken) return res.status(400).json({ message: 'Verification эхлээгүй.' })
   const records = await resolveTxt(`_tradeflow.${tenant.domain}`).catch(() => []); if (!records.some((parts) => parts.join('') === tenant.domainVerificationToken)) return res.status(409).json({ message: 'DNS TXT record баталгаажаагүй байна.' })
   res.json(await prisma.tenant.update({ where: { id: tenant.id }, data: { domainVerifiedAt: new Date() } }))
+})
+
+router.get('/my-permissions', requireTenant, async (req, res) => {
+  if (req.user!.role === Role.ADMIN) return res.json(permissionModules.map((module) => ({ module, canRead: true, canCreate: true, canUpdate: true, canDelete: true })))
+  await ensurePermissionMatrix(tenantId(req))
+  res.json(await prisma.rolePermission.findMany({ where: { tenantId: tenantId(req), role: req.user!.role }, select: { module: true, canRead: true, canCreate: true, canUpdate: true, canDelete: true } }))
 })
 
 router.use(requireTenant, admin)

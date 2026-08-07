@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { prisma } from '../lib/prisma.js'
 import { app } from '../app.js'
 import { signAccessToken } from '../utils/auth.js'
+import { tenantContext } from '../lib/tenant-context.js'
 
 const stamp = `${Date.now()}-${Math.random().toString(16).slice(2)}`
 const ids: { tenants: string[]; users: string[]; categories: string[]; products: string[]; warehouses: string[] } = { tenants: [], users: [], categories: [], products: [], warehouses: [] }
@@ -52,6 +53,15 @@ describe('tenant isolation', () => {
     await prisma.rolePermission.create({ data: { tenantId: ids.tenants[0]!, role: 'VENDOR', module: 'catalog', canRead: false } })
     const token = signAccessToken({ id: ids.users[0]!, email: `vendor-${stamp}-a@test.local`, role: 'VENDOR', tenantId: ids.tenants[0]! })
     await request(app).get('/api/v1/products/manage').set('Authorization', `Bearer ${token}`).expect(403)
+  })
+  it('scopes unique reads, updates, deletes and upserts to the active tenant', async () => {
+    await tenantContext.run({ tenantId: ids.tenants[0] }, async () => {
+      expect(await prisma.product.findUnique({ where: { id: ids.products[1] } })).toBeNull()
+      await expect(prisma.product.update({ where: { id: ids.products[1] }, data: { name: 'Cross tenant update' } })).rejects.toMatchObject({ code: 'P2025' })
+      await expect(prisma.product.delete({ where: { id: ids.products[1] } })).rejects.toMatchObject({ code: 'P2025' })
+      await expect(prisma.product.upsert({ where: { id: ids.products[1]! }, update: { name: 'Cross tenant upsert' }, create: { id: ids.products[1]!, name: 'Blocked clone', slug: `blocked-${stamp}`, description: 'Blocked cross tenant clone', price: 1, stock: 0, image: '/test.jpg', images: [], tags: [], tenantId: ids.tenants[0]!, categoryId: ids.categories[0]!, vendorId: ids.users[0]! } })).rejects.toMatchObject({ code: 'P2002' })
+    })
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: ids.products[1] } })).name).toBe('Secret b')
   })
 })
 

@@ -13,20 +13,24 @@ import { hashToken } from '../utils/auth.js'
 
 const router = Router()
 router.use(authenticate, requireTenant)
-const schema = z.object({ items: z.array(z.object({ productId: z.string(), quantity: z.number().int().positive() })).min(1), recipientName: z.string().min(2), phone: z.string().min(8), city: z.string().min(2), district: z.string().min(2), address: z.string().min(4), channel: z.enum(['B2C', 'B2B', 'MANUAL']).default('B2C'), customerId: z.string().optional(), couponCode: z.string().optional(), deliveryZoneId: z.string().optional() })
+const schema = z.object({ items: z.array(z.object({ productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().positive() })).min(1), recipientName: z.string().min(2), phone: z.string().min(8), city: z.string().min(2), district: z.string().min(2), address: z.string().min(4), channel: z.enum(['B2C', 'B2B', 'MANUAL']).default('B2C'), customerId: z.string().optional(), couponCode: z.string().optional(), deliveryZoneId: z.string().optional() })
 
 router.post('/', async (req, res) => {
   const input = schema.parse(req.body)
   const tenantId = req.user!.tenantId!
   const allowedChannels = input.channel === 'B2B' ? [ProductChannel.BOTH, ProductChannel.B2B] : input.channel === 'B2C' ? [ProductChannel.BOTH, ProductChannel.B2C] : [ProductChannel.BOTH, ProductChannel.B2B, ProductChannel.B2C]
-  const products = await prisma.product.findMany({ where: { id: { in: input.items.map((item) => item.productId) }, tenantId, active: true, channel: { in: allowedChannels } } })
-  if (products.length !== input.items.length) return res.status(400).json({ message: 'Зарим бүтээгдэхүүн олдсонгүй.' })
+  const productIds = [...new Set(input.items.map((item) => item.productId))]
+  const products = await prisma.product.findMany({ where: { id: { in: productIds }, tenantId, active: true, channel: { in: allowedChannels } } })
+  if (products.length !== productIds.length) return res.status(400).json({ message: 'Зарим бүтээгдэхүүн олдсонгүй.' })
+  const requestedVariantIds = input.items.map((item) => item.variantId).filter((id): id is string => Boolean(id))
+  const variants = requestedVariantIds.length ? await prisma.productVariant.findMany({ where: { id: { in: requestedVariantIds }, tenantId, active: true } }) : []
+  if (requestedVariantIds.some((id) => !variants.some((variant) => variant.id === id && input.items.some((item) => item.variantId === id && item.productId === variant.productId)))) return res.status(400).json({ message: 'Зарим бүтээгдэхүүний хувилбар буруу байна.' })
   const trackingToken = crypto.randomBytes(32).toString('hex')
   const order = await prisma.$transaction(async (tx) => {
     const requestedCustomer = input.customerId ? await tx.customerAccount.findFirst({ where: { id: input.customerId, tenantId, active: true } }) : null
     if (input.customerId && !['ADMIN', 'MANAGER', 'EMPLOYEE'].includes(req.user!.role)) throw Object.assign(new Error('Гар захиалга үүсгэх эрхгүй.'), { status: 403 })
     const customer = input.channel === 'B2B' ? requestedCustomer ?? await tx.customerAccount.findFirst({ where: { tenantId, userId: req.user!.id, active: true } }) : null
-    const priced = await Promise.all(input.items.map(async (item) => ({ ...item, ...(await resolvePrice(tx, { tenantId, productId: item.productId, quantity: item.quantity, customerId: customer?.id, groupCode: customer?.groupCode ?? undefined })) })))
+    const priced = await Promise.all(input.items.map(async (item) => ({ ...item, ...(await resolvePrice(tx, { tenantId, productId: item.productId, variantId: item.variantId, quantity: item.quantity, customerId: customer?.id, groupCode: customer?.groupCode ?? undefined })) })))
     const subtotal = priced.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
     const zone = input.deliveryZoneId ? await tx.deliveryZone.findFirst({ where: { id: input.deliveryZoneId, tenantId, active: true, city: { equals: input.city, mode: 'insensitive' }, districts: { has: input.district } } }) : null
     if (input.deliveryZoneId && !zone) throw Object.assign(new Error('Сонгосон хүргэлтийн бүс хаягтай тохирохгүй.'), { status: 400 })
@@ -36,9 +40,9 @@ router.post('/', async (req, res) => {
     const discountAmount = coupon ? Math.min(subtotal, coupon.type === 'PERCENT' ? subtotal * Number(coupon.value) / 100 : Number(coupon.value)) : 0
     const total = subtotal - discountAmount + deliveryFee
     if (input.channel === 'B2B' && (!customer || Number(customer.creditUsed) + total > Number(customer.creditLimit))) throw Object.assign(new Error('B2B зээлийн хязгаар хүрэлцэхгүй.'), { status: 409 })
-    const reservations: Array<{ productId: string; warehouseId: string; quantity: number }> = []
+    const reservations: Array<{ productId: string; variantId?: string; warehouseId: string; quantity: number }> = []
     for (const item of priced) {
-      const balances = await tx.inventoryBalance.findMany({ where: { tenantId, productId: item.productId }, orderBy: { updatedAt: 'asc' } })
+      const balances = await tx.inventoryBalance.findMany({ where: { tenantId, productId: item.productId, variantId: item.variantId ?? '' }, orderBy: { updatedAt: 'asc' } })
       const balance = balances.find((row) => row.onHand - row.reserved >= item.quantity)
       if (!balance) throw Object.assign(new Error('Үлдэгдэл хүрэлцэхгүй эсвэл өөр захиалгад нөөцлөгдсөн.'), { status: 409 })
       const claimed = await tx.inventoryBalance.updateMany({
@@ -46,10 +50,10 @@ router.post('/', async (req, res) => {
         data: { reserved: { increment: item.quantity } },
       })
       if (claimed.count !== 1) throw Object.assign(new Error('Үлдэгдлийг өөр захиалга түрүүлж нөөцөлсөн байна. Дахин оролдоно уу.'), { status: 409 })
-      reservations.push({ productId: item.productId, warehouseId: balance.warehouseId, quantity: item.quantity })
+      reservations.push({ productId: item.productId, variantId: item.variantId, warehouseId: balance.warehouseId, quantity: item.quantity })
     }
     const initialStatus = input.channel === 'B2B' ? OrderStatus.CONFIRMED : OrderStatus.PENDING
-    const created = await tx.order.create({ data: { orderNumber: `TF-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`, tenantId, channel: input.channel, status: initialStatus, userId: customer?.userId ?? req.user!.id, subtotal, deliveryFee, discountAmount, couponCode: coupon?.code, deliveryZoneId: zone?.id, trackingTokenHash: hashToken(trackingToken), total, recipientName: input.recipientName, phone: input.phone, city: input.city, district: input.district, address: input.address, items: { create: priced.map((item) => ({ productId: item.productId, quantity: item.quantity, unitPrice: item.price, appliedPriceSource: item.source })) } }, include: { items: { include: { product: true } } } })
+    const created = await tx.order.create({ data: { orderNumber: `TF-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`, tenantId, channel: input.channel, status: initialStatus, userId: customer?.userId ?? req.user!.id, subtotal, deliveryFee, discountAmount, couponCode: coupon?.code, deliveryZoneId: zone?.id, trackingTokenHash: hashToken(trackingToken), total, recipientName: input.recipientName, phone: input.phone, city: input.city, district: input.district, address: input.address, items: { create: priced.map((item) => ({ productId: item.productId, variantId: item.variantId, quantity: item.quantity, unitPrice: item.price, appliedPriceSource: item.source })) } }, include: { items: { include: { product: true } } } })
     if (coupon) await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } })
     if (initialStatus !== OrderStatus.PENDING) await tx.orderStatusHistory.create({ data: { tenantId, orderId: created.id, fromStatus: OrderStatus.PENDING, toStatus: initialStatus, changedBy: req.user!.id, reason: 'B2B зээлийн нөхцөлөөр баталгаажсан' } })
     if (customer) await tx.customerAccount.update({ where: { id: customer.id }, data: { creditUsed: { increment: total } } })

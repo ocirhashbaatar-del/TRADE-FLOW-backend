@@ -3,13 +3,13 @@ import { InventoryCountStatus, NotificationType, Role, StockMovementType, StockT
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { audit } from '../lib/audit.js'
-import { syncProductStock } from '../lib/inventory.js'
-import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
+import { applyStockMovement } from '../lib/inventory.js'
+import { authenticate, authorize, authorizePermission, requireTenant } from '../middleware/auth.js'
 import { assertSubscriptionCapacity } from '../lib/subscription.js'
 
 const router = Router()
 router.use(authenticate, requireTenant)
-const staff = authorize(Role.ADMIN, Role.MANAGER, Role.EMPLOYEE, Role.VENDOR)
+const staff = authorizePermission('inventory', 'auto', Role.ADMIN, Role.MANAGER, Role.EMPLOYEE, Role.VENDOR)
 
 router.get('/warehouses', async (req, res) => {
   res.json(await prisma.warehouse.findMany({ where: { tenantId: req.user!.tenantId! }, orderBy: { name: 'asc' } }))
@@ -29,6 +29,17 @@ router.get('/balances', async (req, res) => {
 router.get('/movements', async (req, res) => {
   res.json(await prisma.stockMovement.findMany({ where: { tenantId: req.user!.tenantId! }, orderBy: { createdAt: 'desc' }, take: 200 }))
 })
+router.post('/movements/:id/reverse', staff, async (req, res) => {
+  const { reason } = z.object({ reason: z.string().min(3) }).parse(req.body), tenantId = req.user!.tenantId!
+  const result = await prisma.$transaction(async (tx) => {
+    const original = await tx.stockMovement.findFirst({ where: { id: String(req.params.id), tenantId } })
+    if (!original) throw Object.assign(new Error('Нөөцийн хөдөлгөөн олдсонгүй.'), { status: 404 })
+    if (await tx.stockMovement.findFirst({ where: { tenantId, reversesId: original.id } })) throw Object.assign(new Error('Энэ хөдөлгөөн аль хэдийн буцаагдсан.'), { status: 409 })
+    return applyStockMovement(tx, { tenantId, warehouseId: original.warehouseId, productId: original.productId, variantId: original.variantId, batchId: original.batchId ?? undefined, type: StockMovementType.ADJUSTMENT, quantity: -original.quantity, unitCost: original.unitCost ? Number(original.unitCost) : undefined, reference: `REV:${original.reference ?? original.id}`, reason, createdBy: req.user!.id, reversesId: original.id })
+  }, { isolationLevel: 'Serializable' })
+  await audit(req, 'REVERSE', 'StockMovement', String(req.params.id), undefined, result)
+  res.status(201).json(result)
+})
 router.post('/adjustments', staff, async (req, res) => {
   const input = z.object({ warehouseId: z.string(), productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().refine((value) => value !== 0), reason: z.string().min(3) }).parse(req.body)
   const tenantId = req.user!.tenantId!
@@ -36,15 +47,7 @@ router.post('/adjustments', staff, async (req, res) => {
     const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, tenantId } })
     const product = await tx.product.findFirst({ where: { id: input.productId, tenantId } })
     if (!warehouse || !product) throw Object.assign(new Error('Агуулах эсвэл бүтээгдэхүүн олдсонгүй.'), { status: 404 })
-    const balance = await tx.inventoryBalance.upsert({
-      where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: input.warehouseId, productId: input.productId, variantId: input.variantId ?? '' } },
-      create: { tenantId, warehouseId: input.warehouseId, productId: input.productId, variantId: input.variantId ?? '', onHand: input.quantity },
-      update: { onHand: { increment: input.quantity } },
-    })
-    if (balance.onHand < 0) throw Object.assign(new Error('Үлдэгдэл сөрөг болох боломжгүй.'), { status: 409 })
-    const movement = await tx.stockMovement.create({ data: { tenantId, warehouseId: input.warehouseId, productId: input.productId, variantId: input.variantId, type: StockMovementType.ADJUSTMENT, quantity: input.quantity, reason: input.reason, createdBy: req.user!.id } })
-    await syncProductStock(tx, tenantId, input.productId)
-    return { balance, movement }
+    return applyStockMovement(tx, { tenantId, warehouseId: input.warehouseId, productId: input.productId, variantId: input.variantId, type: StockMovementType.ADJUSTMENT, quantity: input.quantity, reason: input.reason, createdBy: req.user!.id })
   })
   await audit(req, 'ADJUST', 'InventoryBalance', input.productId, undefined, row)
   res.status(201).json(row)
@@ -73,10 +76,7 @@ router.post('/transfers/:id/ship', staff, async (req, res) => {
     const variantId = transfer.variantId ?? ''
     const balance = await tx.inventoryBalance.findUnique({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: transfer.fromWarehouseId, productId: transfer.productId, variantId } } })
     if (!balance || balance.onHand - balance.reserved < transfer.quantity) throw Object.assign(new Error('Шилжүүлэх боломжит үлдэгдэл хүрэлцэхгүй.'), { status: 409 })
-    const moved = await tx.inventoryBalance.updateMany({ where: { id: balance.id, onHand: balance.onHand, reserved: balance.reserved }, data: { onHand: { decrement: transfer.quantity } } })
-    if (!moved.count) throw Object.assign(new Error('Үлдэгдэл өөрчлөгдсөн тул дахин оролдоно уу.'), { status: 409 })
-    await tx.stockMovement.create({ data: { tenantId, warehouseId: transfer.fromWarehouseId, productId: transfer.productId, variantId: transfer.variantId, type: StockMovementType.TRANSFER_OUT, quantity: -transfer.quantity, reference: transfer.reference, reason: transfer.reason, createdBy: req.user!.id } })
-    await syncProductStock(tx, tenantId, transfer.productId)
+    await applyStockMovement(tx, { tenantId, warehouseId: transfer.fromWarehouseId, productId: transfer.productId, variantId: transfer.variantId, type: StockMovementType.TRANSFER_OUT, quantity: -transfer.quantity, reference: transfer.reference, reason: transfer.reason, createdBy: req.user!.id })
     return tx.stockTransfer.update({ where: { id }, data: { status: StockTransferStatus.SHIPPED, shippedBy: req.user!.id, shippedAt: new Date() } })
   }, { isolationLevel: 'Serializable' })
   await audit(req, 'SHIP', 'StockTransfer', id, undefined, result)
@@ -91,9 +91,7 @@ router.post('/transfers/:id/receive', staff, async (req, res) => {
     const receivedQuantity = input.receivedQuantity ?? transfer.quantity
     if (receivedQuantity > transfer.quantity) throw Object.assign(new Error('Хүлээн авсан тоо илгээсэн тооноос их байж болохгүй.'), { status: 400 })
     const variantId = transfer.variantId ?? ''
-    await tx.inventoryBalance.upsert({ where: { tenantId_warehouseId_productId_variantId: { tenantId, warehouseId: transfer.toWarehouseId, productId: transfer.productId, variantId } }, create: { tenantId, warehouseId: transfer.toWarehouseId, productId: transfer.productId, variantId, onHand: receivedQuantity }, update: { onHand: { increment: receivedQuantity } } })
-    await tx.stockMovement.create({ data: { tenantId, warehouseId: transfer.toWarehouseId, productId: transfer.productId, variantId: transfer.variantId, type: StockMovementType.TRANSFER_IN, quantity: receivedQuantity, reference: transfer.reference, reason: receivedQuantity === transfer.quantity ? transfer.reason : `${transfer.reason}; зөрүү: ${transfer.quantity - receivedQuantity}`, createdBy: req.user!.id } })
-    await syncProductStock(tx, tenantId, transfer.productId)
+    await applyStockMovement(tx, { tenantId, warehouseId: transfer.toWarehouseId, productId: transfer.productId, variantId: transfer.variantId, type: StockMovementType.TRANSFER_IN, quantity: receivedQuantity, reference: transfer.reference, reason: receivedQuantity === transfer.quantity ? transfer.reason : `${transfer.reason}; зөрүү: ${transfer.quantity - receivedQuantity}`, createdBy: req.user!.id })
     return tx.stockTransfer.update({ where: { id }, data: { status: StockTransferStatus.RECEIVED, receivedQuantity, receivedBy: req.user!.id, receivedAt: new Date() } })
   }, { isolationLevel: 'Serializable' })
   await audit(req, 'RECEIVE', 'StockTransfer', id, undefined, result)
@@ -128,10 +126,7 @@ router.post('/counts/:id/approve', authorize(Role.ADMIN, Role.MANAGER), async (r
       const current = balance?.onHand ?? 0
       const difference = line.countedQty - current
       if (balance && line.countedQty < balance.reserved) throw Object.assign(new Error('Тоолсон үлдэгдэл идэвхтэй reservation-оос бага байна.'), { status: 409 })
-      if (balance) await tx.inventoryBalance.update({ where: { id: balance.id }, data: { onHand: line.countedQty } })
-      else await tx.inventoryBalance.create({ data: { tenantId, warehouseId: count.warehouseId, productId: line.productId, variantId, onHand: line.countedQty } })
-      if (difference) await tx.stockMovement.create({ data: { tenantId, warehouseId: count.warehouseId, productId: line.productId, variantId: line.variantId, type: StockMovementType.ADJUSTMENT, quantity: difference, reference: `COUNT:${count.id}`, reason: `Батлагдсан тооллого: ${line.reason}`, createdBy: req.user!.id } })
-      await syncProductStock(tx, tenantId, line.productId)
+      if (difference) await applyStockMovement(tx, { tenantId, warehouseId: count.warehouseId, productId: line.productId, variantId: line.variantId, type: StockMovementType.ADJUSTMENT, quantity: difference, reference: `COUNT:${count.id}`, reason: `Батлагдсан тооллого: ${line.reason}`, createdBy: req.user!.id })
     }
     return tx.inventoryCount.update({ where: { id }, data: { status: InventoryCountStatus.APPROVED, reviewedBy: req.user!.id, reviewedAt: new Date() }, include: { lines: true } })
   }, { isolationLevel: 'Serializable' })

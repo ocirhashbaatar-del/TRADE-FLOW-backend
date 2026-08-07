@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client'
 
 type Db = Prisma.TransactionClient
-export async function resolvePrice(db: Db, input: { tenantId: string; productId: string; quantity: number; customerId?: string; groupCode?: string }) {
+export async function resolvePrice(db: Db, input: { tenantId: string; productId: string; variantId?: string; quantity: number; customerId?: string; groupCode?: string }) {
   const now = new Date()
   const product = await db.product.findFirstOrThrow({ where: { id: input.productId, tenantId: input.tenantId, active: true } })
   const rules = await db.priceRule.findMany({
@@ -9,6 +9,7 @@ export async function resolvePrice(db: Db, input: { tenantId: string; productId:
       tenantId: input.tenantId,
       productId: input.productId,
       active: true,
+      OR: input.variantId ? [{ variantId: input.variantId }, { variantId: null }] : [{ variantId: null }],
       minQuantity: { lte: input.quantity },
       AND: [
         { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
@@ -20,7 +21,8 @@ export async function resolvePrice(db: Db, input: { tenantId: string; productId:
   const selected = rules.find((rule) => input.customerId && rule.customerId === input.customerId)
     ?? rules.find((rule) => input.groupCode && rule.groupCode === input.groupCode)
     ?? rules.find((rule) => !rule.customerId && !rule.groupCode)
-  const basePrice = Number(selected?.price ?? product.price)
+  const variant = input.variantId ? await db.productVariant.findFirstOrThrow({ where: { id: input.variantId, productId: input.productId, tenantId: input.tenantId, active: true } }) : null
+  const basePrice = Number(selected?.price ?? variant?.price ?? product.price)
   const promotion = await db.promotion.findFirst({
     where: {
       tenantId: input.tenantId, active: true, minQuantity: { lte: input.quantity },
