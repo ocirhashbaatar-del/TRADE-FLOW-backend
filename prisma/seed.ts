@@ -1,6 +1,22 @@
 import { PrismaClient, Role } from '@prisma/client'
 import bcrypt from 'bcrypt'
 
+// ---------------------------------------------------------------------------
+// DEVELOPMENT/TEST SEED ONLY
+// ---------------------------------------------------------------------------
+// This seed creates a demo tenant, demo catalog and well-known user accounts
+// with fixed passwords. It MUST NOT run automatically in production startup.
+// Production tenants are provisioned via the platform admin or production data
+// import runbook (12.7), never from this file.
+//
+// Guard: refuse to run when NODE_ENV=production unless SEED_PRODUCTION_ALLOWED
+// is explicitly set to "true". The production deployment scripts (package.json
+// `deploy:start`, Dockerfile CMD) no longer invoke the seed automatically.
+const isProduction = process.env.NODE_ENV === 'production'
+if (isProduction && process.env.SEED_PRODUCTION_ALLOWED !== 'true') {
+  throw new Error('Demo seed нь production орчинд ажиллахыг хориглоно. SEED_PRODUCTION_ALLOWED нарийн тохиргоогоор л зөвшөөрнө.')
+}
+
 const prisma = new PrismaClient()
 
 const catalog = [

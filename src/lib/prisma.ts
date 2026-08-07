@@ -12,6 +12,7 @@ const tenantModels = new Set([
   'Coupon', 'DeliveryZone', 'CreditApproval', 'ProductImage', 'WarehouseLocation', 'GoodsReceiptAttachment',
   'ShipmentEvent', 'DeliveryManifest',
   'ReminderDeliveryLog', 'Refund', 'SavedOrderTemplate',
+  'PlanChangeHistory', 'TenantExportJob',
 ])
 const appendOnlyModels = new Set(['AuditLog', 'StockMovement', 'FinancialEntry', 'PaymentAllocation', 'SupplierPayment'])
 const assertMutable = (model: string) => { if (process.env.NODE_ENV !== 'test' && appendOnlyModels.has(model)) throw new Error(`${model} append-only тул update/delete хийх боломжгүй.`) }

@@ -4,10 +4,10 @@ import { verifyAccessToken } from '../utils/auth.js'
 import { prisma } from '../lib/prisma.js'
 import { setTenantContext } from '../lib/tenant-context.js'
 
-export function authenticate(req: Request, res: Response, next: NextFunction) {
+export async function authenticate(req: Request, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
   if (!token) return res.status(401).json({ message: 'Нэвтрэх шаардлагатай.' })
-  try { req.user = verifyAccessToken(token); setTenantContext(req.user.tenantId); next() }
+  try { req.user = verifyAccessToken(token); setTenantContext(req.user.tenantId); if (req.user.tenantId) { const [tenant,user]=await Promise.all([prisma.tenant.findUnique({where:{id:req.user.tenantId},select:{active:true}}),prisma.user.findUnique({where:{id:req.user.id},select:{platformAdmin:true}})]); if(tenant&&!tenant.active&&!user?.platformAdmin)return res.status(423).json({message:'Энэ байгууллагын үйлчилгээ түр түдгэлзсэн байна.'}) } next() }
   catch { res.status(401).json({ message: 'Token хүчингүй эсвэл хугацаа дууссан.' }) }
 }
 

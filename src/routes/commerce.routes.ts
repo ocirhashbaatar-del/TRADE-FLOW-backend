@@ -4,8 +4,12 @@ import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { authenticate, authorize, requireTenant } from '../middleware/auth.js'
 import { hashToken } from '../utils/auth.js'
+import { findStorefrontTenant } from '../utils/storefront-tenant.js'
 
 const router = Router()
+router.get('/storefront-meta',async(req,res)=>{const tenant=await findStorefrontTenant(req.hostname);if(!tenant)return res.status(404).json({message:'Storefront олдсонгүй.'});res.json({name:tenant.name,slug:tenant.slug,domain:tenant.domain,logo:tenant.logo,primaryColor:tenant.primaryColor,canonical:`https://${tenant.domain??req.hostname}`})})
+router.get('/sitemap.xml',async(req,res)=>{const tenant=await findStorefrontTenant(req.hostname);if(!tenant)return res.status(404).send('');const base=`https://${tenant.domain??req.hostname}`,[products,categories]=await Promise.all([prisma.product.findMany({where:{tenantId:tenant.id,active:true},select:{id:true,updatedAt:true}}),prisma.category.findMany({where:{tenantId:tenant.id},select:{slug:true}})]);const urls=[`<url><loc>${base}/</loc></url>`,`<url><loc>${base}/products</loc></url>`,...categories.map(x=>`<url><loc>${base}/products?category=${encodeURIComponent(x.slug)}</loc></url>`),...products.map(x=>`<url><loc>${base}/products/${x.id}</loc><lastmod>${x.updatedAt.toISOString()}</lastmod></url>`)];res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.join('')}</urlset>`)})
+router.get('/robots.txt',async(req,res)=>{const tenant=await findStorefrontTenant(req.hostname),base=`https://${tenant?.domain??req.hostname}`;res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: ${base}/api/v1/commerce/sitemap.xml\n`)})
 
 router.get('/track/:token', async (req, res) => {
   const order = await prisma.order.findUnique({ where: { trackingTokenHash: hashToken(String(req.params.token)) }, select: { orderNumber: true, status: true, paymentStatus: true, updatedAt: true, statusHistory: { orderBy: { createdAt: 'asc' }, select: { toStatus: true, createdAt: true } } } })

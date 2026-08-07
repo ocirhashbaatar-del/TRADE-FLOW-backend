@@ -28,11 +28,13 @@ import adminRoutes from './routes/admin.routes.js'
 import catalogRoutes from './routes/catalog.routes.js'
 import shoppingRoutes from './routes/shopping.routes.js'
 import commerceRoutes from './routes/commerce.routes.js'
+import platformExportRoutes from './routes/platform-export.routes.js'
 import { errorHandler, notFound } from './middleware/error.js'
 import { openApiSpec } from './swagger.js'
 import { requestContext } from './middleware/request-context.js'
 import { notifyTenant } from './socket.js'
 import { prisma } from './lib/prisma.js'
+import { checkoutRateLimit, qpayCallbackRateLimit } from './lib/rate-limits.js'
 
 export const app = express()
 app.set('trust proxy', 1)
@@ -60,13 +62,14 @@ app.use((req, res, next) => {
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: 'draft-8' }))
 app.get('/api/v1/health', (_req, res) => res.json({ status: 'ok', service: 'tradeflow-api', timestamp: new Date().toISOString() }))
+app.use('/api/v1/platform-export', platformExportRoutes)
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec, { customSiteTitle: 'TradeFlow API Docs' }))
 app.use('/api/v1/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8' }), authRoutes)
 app.use('/api/v1/products', productRoutes)
 app.use('/api/v1/categories', categoryRoutes)
 app.use('/api/v1/shopping', shoppingRoutes)
-app.use('/api/v1/orders', orderRoutes)
-app.use('/api/v1/payments', paymentRoutes)
+app.use('/api/v1/orders', checkoutRateLimit, orderRoutes)
+app.use('/api/v1/payments', qpayCallbackRateLimit, paymentRoutes)
 app.use('/api/v1/notifications', notificationRoutes)
 app.use('/api/v1/chat', chatRoutes)
 app.use('/api/v1/uploads', uploadRoutes)

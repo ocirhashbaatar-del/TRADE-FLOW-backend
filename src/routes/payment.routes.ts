@@ -12,10 +12,11 @@ import { env } from '../config/env.js'
 import { checkQPayInvoice, createQPayInvoice, qpayConfigured } from '../lib/qpay.js'
 import { postPayment } from '../lib/payment-posting.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
+import { isEnabled } from '../lib/feature-flags.js'
 
 const router = Router()
 router.post('/intent', authenticate, async (req, res) => {
-  if (!stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй.' })
+  if (!isEnabled('stripe') || !stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй.' })
   const { orderId } = z.object({ orderId: z.string() }).parse(req.body)
   const order = await prisma.order.findFirst({ where: { id: orderId, userId: req.user!.id } })
   if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })
@@ -74,7 +75,7 @@ router.post('/otp/verify', async (req, res) => {
   res.json({ verified: true, phone: row.phone })
 })
 router.post('/qpay/invoice', authenticate, async (req, res) => {
-  if (!qpayConfigured()) return res.status(503).json({ message: 'QPay production тохиргоо дутуу байна.' })
+  if (!isEnabled('qpay') || !qpayConfigured()) return res.status(503).json({ message: 'QPay production тохиргоо дутуу байна.' })
   const { orderId } = z.object({ orderId: z.string() }).parse(req.body)
   const staff = ['ADMIN','MANAGER','ACCOUNTANT'].includes(req.user!.role)
   const order = await prisma.order.findFirst({ where: { id: orderId, tenantId: req.user!.tenantId, ...(staff ? {} : { userId: req.user!.id }) } })
@@ -143,6 +144,7 @@ router.post('/bank-transfers/:id/reject', authenticate, requireTenant, authorize
   res.json(await prisma.bankTransfer.update({ where: { id: current.id }, data: { status: 'REJECTED', rejectionReason: reason, reviewedBy: req.user!.id, reviewedAt: new Date() } }))
 })
 router.post('/ebarimt/:orderId', authenticate, async (req, res) => {
+  if (!isEnabled('eBarimt')) return res.status(503).json({ message: 'E-barimt үйлчилгээ түр хаалттай.' })
   const staff = ['ADMIN','MANAGER','ACCOUNTANT'].includes(req.user!.role)
   const order = await prisma.order.findFirst({ where: { id: String(req.params.orderId), tenantId: req.user!.tenantId, ...(staff ? {} : { userId: req.user!.id }) }, include: { items: { include: { product: true } } } })
   if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })

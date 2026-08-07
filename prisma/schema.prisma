@@ -405,9 +405,22 @@ model Notification {
   description String
   type        NotificationType
   read        Boolean          @default(false)
+  idempotencyKey String?       @unique
   createdAt   DateTime         @default(now())
 
   @@index([userId, read])
+}
+
+model NotificationPreference {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  inApp     Boolean          @default(true)
+  email     Boolean          @default(false)
+  sms       Boolean          @default(false)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  @@unique([userId, type])
 }
 
 model Message {
@@ -449,6 +462,40 @@ model Tenant {
   active                  Boolean   @default(true)
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
+}
+
+model PlanChangeHistory {
+  id         String   @id @default(cuid())
+  tenantId   String
+  fromPlan   String
+  toPlan     String
+  changedBy  String
+  reason     String?
+  createdAt  DateTime @default(now())
+  @@index([tenantId, createdAt])
+}
+
+model TenantExportJob {
+  id          String   @id @default(cuid())
+  tenantId    String
+  status      String   @default("READY")
+  requestedBy String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  @@index([tenantId, createdAt])
+}
+
+model PlatformIncident {
+  id           String    @id @default(cuid())
+  tenantId     String?
+  severity     String
+  source       String
+  title        String
+  details      Json?
+  acknowledged Boolean   @default(false)
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  @@index([acknowledged, createdAt])
 }
 
 model RolePermission {

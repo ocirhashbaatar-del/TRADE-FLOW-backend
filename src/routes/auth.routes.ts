@@ -10,6 +10,7 @@ import { hashToken, signAccessToken, signRefreshToken, verifyRefreshToken } from
 import { sendMail } from '../lib/services.js'
 import { env } from '../config/env.js'
 import { redis } from '../lib/redis.js'
+import { otpRateLimit, oauthRateLimit } from '../lib/rate-limits.js'
 import { findStorefrontTenant } from '../utils/storefront-tenant.js'
 import { assertSubscriptionCapacity } from '../lib/subscription.js'
 
@@ -28,7 +29,7 @@ const oauthErrorCode = (error: unknown) => {
   return 'oauth_failed'
 }
 
-router.post('/phone/request', async (req, res) => {
+router.post('/phone/request', otpRateLimit, async (req, res) => {
   const parsed = z.object({ phone: z.string().min(8).max(20) }).parse(req.body), phone = normalizePhone(parsed.phone)
   const user = await prisma.user.findFirst({ where: { phone } })
   if (!user) return res.status(404).json({ message: 'Энэ утасны дугаартай бүртгэл олдсонгүй.' })
@@ -39,7 +40,7 @@ router.post('/phone/request', async (req, res) => {
   res.status(201).json({ challengeId: challenge.id, expiresIn: 300, ...(env.NODE_ENV !== 'production' ? { devCode: code } : {}) })
 })
 
-router.post('/phone/register/request', async (req, res) => {
+router.post('/phone/register/request', otpRateLimit, async (req, res) => {
   const input = z.object({ name: z.string().trim().min(2), phone: z.string().min(8).max(20) }).parse(req.body), phone = normalizePhone(input.phone)
   if (await prisma.user.findUnique({ where: { phone } })) return res.status(409).json({ message: 'Энэ утасны дугаар бүртгэлтэй байна. Нэвтрэх хэсгийг ашиглана уу.' })
   await prisma.otpChallenge.deleteMany({ where: { phone, verifiedAt: null } })
@@ -47,7 +48,7 @@ router.post('/phone/register/request', async (req, res) => {
   res.status(201).json({ challengeId: challenge.id, expiresIn: 300, ...(env.NODE_ENV !== 'production' ? { devCode: code } : {}) })
 })
 
-router.post('/phone/register/verify', async (req, res) => {
+router.post('/phone/register/verify', otpRateLimit, async (req, res) => {
   const input = z.object({ name: z.string().trim().min(2), challengeId: z.string(), code: z.string().length(6) }).parse(req.body)
   const challenge = await prisma.otpChallenge.findUnique({ where: { id: input.challengeId } })
   if (!challenge || challenge.verifiedAt || challenge.expiresAt < new Date() || challenge.attempts >= 5) return res.status(400).json({ message: 'OTP хүчингүй эсвэл хугацаа дууссан.' })
@@ -62,7 +63,7 @@ router.post('/phone/register/verify', async (req, res) => {
   res.status(201).json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
 })
 
-router.post('/phone/verify', async (req, res) => {
+router.post('/phone/verify', otpRateLimit, async (req, res) => {
   const input = z.object({ challengeId: z.string(), code: z.string().length(6) }).parse(req.body)
   const challenge = await prisma.otpChallenge.findUnique({ where: { id: input.challengeId } })
   if (!challenge || challenge.verifiedAt || challenge.expiresAt < new Date() || challenge.attempts >= 5) return res.status(400).json({ message: 'OTP хүчингүй эсвэл хугацаа дууссан.' })
@@ -186,7 +187,7 @@ router.post('/oauth/google', async (req, res) => {
   res.json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
 })
 
-router.get('/oauth/:provider/start', async (req, res) => {
+router.get('/oauth/:provider/start', oauthRateLimit, async (req, res) => {
   const provider = z.enum(['google', 'github', 'facebook']).parse(req.params.provider)
   const config = provider === 'google'
     ? { clientId: env.GOOGLE_CLIENT_ID, callback: `${env.BACKEND_PUBLIC_URL}/api/v1/auth/oauth/google/callback` }
@@ -203,7 +204,7 @@ router.get('/oauth/:provider/start', async (req, res) => {
   res.redirect(url)
 })
 
-router.get('/oauth/:provider/callback', async (req, res) => {
+router.get('/oauth/:provider/callback', oauthRateLimit, async (req, res) => {
   // Facebook's link-preview crawler may follow the callback URL before the
   // user's browser and consume the single-use authorization code. Never run
   // OAuth state verification or code exchange for crawler requests.
@@ -278,7 +279,7 @@ router.get('/oauth/:provider/callback', async (req, res) => {
   }
 })
 
-router.post('/oauth/exchange', async (req, res) => {
+router.post('/oauth/exchange', oauthRateLimit, async (req, res) => {
   const { code } = z.object({ code: z.string().min(32) }).parse(req.body)
   if (redis.status !== 'ready') return res.status(503).json({ message: 'OAuth exchange түр боломжгүй.' })
   const key = `oauth:exchange:${code}`

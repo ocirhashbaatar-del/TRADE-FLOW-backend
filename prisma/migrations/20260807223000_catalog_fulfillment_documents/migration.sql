@@ -60,3 +60,14 @@ CREATE INDEX "Refund_tenantId_returnRequestId_idx" ON "Refund"("tenantId", "retu
 CREATE TABLE "SavedOrderTemplate" ("id" TEXT NOT NULL, "tenantId" TEXT NOT NULL, "customerId" TEXT NOT NULL, "name" TEXT NOT NULL, "lines" JSONB NOT NULL, "createdBy" TEXT NOT NULL, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP(3) NOT NULL, CONSTRAINT "SavedOrderTemplate_pkey" PRIMARY KEY ("id"));
 CREATE UNIQUE INDEX "SavedOrderTemplate_tenantId_customerId_name_key" ON "SavedOrderTemplate"("tenantId", "customerId", "name");
 CREATE INDEX "SavedOrderTemplate_tenantId_customerId_idx" ON "SavedOrderTemplate"("tenantId", "customerId");
+
+CREATE TABLE "PlanChangeHistory" ("id" TEXT NOT NULL,"tenantId" TEXT NOT NULL,"fromPlan" TEXT NOT NULL,"toPlan" TEXT NOT NULL,"changedBy" TEXT NOT NULL,"reason" TEXT,"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,CONSTRAINT "PlanChangeHistory_pkey" PRIMARY KEY("id"));
+CREATE INDEX "PlanChangeHistory_tenantId_createdAt_idx" ON "PlanChangeHistory"("tenantId","createdAt");
+CREATE TABLE "TenantExportJob" ("id" TEXT NOT NULL,"tenantId" TEXT NOT NULL,"status" TEXT NOT NULL DEFAULT 'READY',"requestedBy" TEXT NOT NULL,"expiresAt" TIMESTAMP(3) NOT NULL,"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,CONSTRAINT "TenantExportJob_pkey" PRIMARY KEY("id"));
+CREATE INDEX "TenantExportJob_tenantId_createdAt_idx" ON "TenantExportJob"("tenantId","createdAt");
+CREATE TABLE "PlatformIncident" ("id" TEXT NOT NULL,"tenantId" TEXT,"severity" TEXT NOT NULL,"source" TEXT NOT NULL,"title" TEXT NOT NULL,"details" JSONB,"acknowledged" BOOLEAN NOT NULL DEFAULT false,"resolvedAt" TIMESTAMP(3),"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,CONSTRAINT "PlatformIncident_pkey" PRIMARY KEY("id"));
+CREATE INDEX "PlatformIncident_acknowledged_createdAt_idx" ON "PlatformIncident"("acknowledged","createdAt");
+ALTER TABLE "Notification" ADD COLUMN "idempotencyKey" TEXT;
+CREATE UNIQUE INDEX "Notification_idempotencyKey_key" ON "Notification"("idempotencyKey");
+CREATE TABLE "NotificationPreference" ("id" TEXT NOT NULL,"userId" TEXT NOT NULL,"type" "NotificationType" NOT NULL,"inApp" BOOLEAN NOT NULL DEFAULT true,"email" BOOLEAN NOT NULL DEFAULT false,"sms" BOOLEAN NOT NULL DEFAULT false,"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,"updatedAt" TIMESTAMP(3) NOT NULL,CONSTRAINT "NotificationPreference_pkey" PRIMARY KEY("id"));
+CREATE UNIQUE INDEX "NotificationPreference_userId_type_key" ON "NotificationPreference"("userId","type");

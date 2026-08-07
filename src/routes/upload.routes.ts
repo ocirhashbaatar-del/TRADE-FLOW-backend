@@ -8,13 +8,30 @@ import { prisma } from '../lib/prisma.js'
 
 const router = Router()
 const minimumBytes = 100 * 1024
+const maximumBytes = 5 * 1024 * 1024
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
 const allowedFormats = new Set(['jpeg', 'png', 'webp'])
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } })
+// Defense against MIME spoofing: treat the declared Content-Type as advisory and
+// reject any type that is not an image. Combined with `sharp().metadata()` the
+// file content must actually decode as an allowed raster before storage.
+const opaqueTypes = new Set(['application/octet-stream', 'application/x-www-form-urlencoded', 'text/plain'])
+const dangerousExtension = /\.(?:exe|bat|cmd|com|dll|sh|bash|zsh|php|php[0-9]|phtml|pht|jsp|asp|aspx|jar|js|mjs|py|rb|pl|ps1|vbs|hta|msi|svg|html?|shtml|swf|apk|deb|rpm)(?:$|\.)/i
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maximumBytes } })
+
+function sanitizeFilename(original: string | undefined): string {
+  if (!original) return 'image'
+  // Strip any path separators / traversal sequences and keep only a safe basename.
+  const base = original.split(/[\\/]/).pop() ?? ''
+  const clean = base.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').slice(0, 120)
+  return clean || 'image'
+}
 
 router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Зураг сонгоно уу.' })
-  if (!allowedMimeTypes.has(req.file.mimetype)) return res.status(400).json({ message: 'Зөвхөн JPG, JPEG, PNG эсвэл WEBP зураг оруулна уу.' })
+  const safeName = sanitizeFilename(req.file.originalname)
+  if (dangerousExtension.test(safeName.toLowerCase())) return res.status(400).json({ message: 'Энэ файлын нэр зөвшөөрөгдөхгүй байна.' })
+  if (req.file.size > maximumBytes || req.file.size < minimumBytes) return res.status(400).json({ message: 'Зургийн хэмжээ хэт том эсвэл хэт бага байна.' })
+  if (opaqueTypes.has(req.file.mimetype) || !allowedMimeTypes.has(req.file.mimetype)) return res.status(400).json({ message: 'Зөвхөн JPG, JPEG, PNG эсвэл WEBP зураг оруулна уу.' })
   if (req.file.size < minimumBytes) return res.status(400).json({ message: 'Зургийн чанар хэт бага байна, өөр зураг сонгоно уу.' })
 
   let metadata: Metadata
