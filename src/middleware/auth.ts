@@ -42,12 +42,13 @@ export const authorize = (...roles: Role[]) => async (req: Request, res: Respons
   return roles.includes(req.user.role) ? next() : res.status(403).json({ message: 'Энэ үйлдлийг хийх эрхгүй.' })
 }
 
-export const authorizePermission = (module: string, action: 'auto' | 'canRead' | 'canCreate' | 'canUpdate' | 'canDelete', ...fallbackRoles: Role[]) => async (req: Request, res: Response, next: NextFunction) => {
+export const authorizePermission = (module: string, action: 'auto' | 'read' | 'create' | 'update' | 'delete' | 'canRead' | 'canCreate' | 'canUpdate' | 'canDelete', ...fallbackRoles: Role[]) => async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) return res.status(403).json({ message: 'Энэ үйлдлийг хийх эрхгүй.' })
   if (req.user.role === 'ADMIN') return next()
   if (req.user.tenantId) {
     const permission = await prisma.rolePermission.findUnique({ where: { tenantId_role_module: { tenantId: req.user.tenantId, role: req.user.role, module } } })
-    const resolvedAction = action === 'auto' ? permissionAction(req) : action
+    const aliases = { read: 'canRead', create: 'canCreate', update: 'canUpdate', delete: 'canDelete' } as const
+    const resolvedAction = action === 'auto' ? permissionAction(req) : action in aliases ? aliases[action as keyof typeof aliases] : action as 'canRead' | 'canCreate' | 'canUpdate' | 'canDelete'
     if (permission) return permission[resolvedAction] ? next() : res.status(403).json({ message: `${module} хэсгийн ${resolvedAction} эрхгүй.` })
   }
   return fallbackRoles.includes(req.user.role) ? next() : res.status(403).json({ message: 'Энэ үйлдлийг хийх эрхгүй.' })

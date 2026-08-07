@@ -54,6 +54,16 @@ router.post('/', async (req, res) => {
     }
     const initialStatus = input.channel === 'B2B' ? OrderStatus.CONFIRMED : OrderStatus.PENDING
     const created = await tx.order.create({ data: { orderNumber: `TF-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`, tenantId, channel: input.channel, status: initialStatus, userId: customer?.userId ?? req.user!.id, subtotal, deliveryFee, discountAmount, couponCode: coupon?.code, deliveryZoneId: zone?.id, trackingTokenHash: hashToken(trackingToken), total, recipientName: input.recipientName, phone: input.phone, city: input.city, district: input.district, address: input.address, items: { create: priced.map((item) => ({ productId: item.productId, variantId: item.variantId, quantity: item.quantity, unitPrice: item.price, appliedPriceSource: item.source })) } }, include: { items: { include: { product: true } } } })
+    for (const line of created.items) {
+      const pricedLine = priced.find((item) => item.productId === line.productId && (item.variantId ?? '') === line.variantId)!
+      const product = products.find((item) => item.id === line.productId)!
+      const grossAmount = Number(pricedLine.price) * pricedLine.quantity
+      const lineDiscount = subtotal > 0 ? discountAmount * grossAmount / subtotal : 0
+      const taxable = grossAmount - lineDiscount
+      const vatRate = Number(product.vatRate)
+      const vatAmount = taxable * vatRate / (100 + vatRate)
+      await tx.orderItem.update({ where: { id: line.id }, data: { grossAmount, discountAmount: lineDiscount, vatRate, vatAmount, netAmount: taxable - vatAmount } })
+    }
     if (coupon) await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } })
     if (initialStatus !== OrderStatus.PENDING) await tx.orderStatusHistory.create({ data: { tenantId, orderId: created.id, fromStatus: OrderStatus.PENDING, toStatus: initialStatus, changedBy: req.user!.id, reason: 'B2B зээлийн нөхцөлөөр баталгаажсан' } })
     if (customer) await tx.customerAccount.update({ where: { id: customer.id }, data: { creditUsed: { increment: total } } })

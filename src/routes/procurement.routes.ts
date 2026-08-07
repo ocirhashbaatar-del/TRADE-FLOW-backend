@@ -8,6 +8,7 @@ import PDFDocument from 'pdfkit'
 import { sendMail } from '../lib/services.js'
 import { authenticate, authorizePermission, requireTenant } from '../middleware/auth.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
+import { transitionPurchaseOrder } from '../lib/purchase-order-state.js'
 
 const router = Router()
 router.use(authenticate, requireTenant, authorizePermission('procurement', 'auto', Role.ADMIN, Role.MANAGER, Role.VENDOR))
@@ -56,6 +57,9 @@ router.get('/purchase-orders', async (req, res) => {
   res.json(rows.map((row) => ({ ...row, lines: lines.filter((line) => line.purchaseOrderId === row.id) })))
 })
 router.get('/goods-receipts', async (req, res) => res.json(await prisma.goodsReceipt.findMany({ where: { tenantId: tenant(req) }, include: { lines: true }, orderBy: { receivedAt: 'desc' } })))
+router.post('/purchase-orders/:id/transition', async (req, res) => { const input = z.object({ status: z.nativeEnum(PurchaseOrderStatus), confirmed: z.literal(true) }).parse(req.body); const row = await prisma.$transaction((tx) => transitionPurchaseOrder(tx, { tenantId: tenant(req), id: String(req.params.id), to: input.status })); await audit(req, 'TRANSITION', 'PurchaseOrder', row.id, undefined, row); res.json(row) })
+router.post('/goods-receipts/:id/attachments', async (req, res) => { const input = z.object({ url: z.string().url(), mimeType: z.string().min(3) }).parse(req.body), tenantId = tenant(req), id = String(req.params.id); if (!await prisma.goodsReceipt.findFirst({ where: { id, tenantId } })) return res.status(404).json({ message: 'Хүлээн авалтын баримт олдсонгүй.' }); res.status(201).json(await prisma.goodsReceiptAttachment.create({ data: { tenantId, goodsReceiptId: id, ...input, createdBy: req.user!.id } })) })
+router.post('/goods-receipts/:id/review', authorizePermission('procurement', 'update', Role.ADMIN, Role.MANAGER), async (req, res) => { const { approved } = z.object({ approved: z.boolean() }).parse(req.body), tenantId = tenant(req), id = String(req.params.id); const current = await prisma.goodsReceipt.findFirst({ where: { id, tenantId } }); if (!current) return res.status(404).json({ message: 'Хүлээн авалтын баримт олдсонгүй.' }); const row = await prisma.goodsReceipt.update({ where: { id }, data: { status: approved ? 'APPROVED' : 'REJECTED', reviewedBy: req.user!.id, reviewedAt: new Date() } }); await audit(req, approved ? 'APPROVE' : 'REJECT', 'GoodsReceipt', id, current, row); res.json(row) })
 router.post('/purchase-orders', async (req, res) => {
   const input = z.object({ supplierId: z.string(), warehouseId: z.string(), expectedAt: z.coerce.date().optional(), notes: z.string().optional(), lines: z.array(z.object({ productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().positive(), unitCost: z.number().positive() })).min(1) }).parse(req.body)
   const tenantId = tenant(req)
@@ -79,6 +83,7 @@ router.post('/purchase-orders/:id/receive', async (req, res) => {
   const result = await prisma.$transaction(async (tx) => {
     await assertPeriodOpen(tx, tenantId)
     const po = await tx.purchaseOrder.findFirst({ where: { id: req.params.id, tenantId } })
+    if (po?.status === PurchaseOrderStatus.DRAFT) throw Object.assign(new Error('PO-г review хийж SENT төлөвт оруулсны дараа хүлээн авна.'), { status: 409 })
     if (!po || po.status === PurchaseOrderStatus.CLOSED || po.status === PurchaseOrderStatus.CANCELLED) throw Object.assign(new Error('PO хүлээн авах боломжгүй.'), { status: 409 })
     const receipt = await tx.goodsReceipt.create({ data: { tenantId, code: `GR-${Date.now()}`, purchaseOrderId: po.id, supplierId: po.supplierId, warehouseId: po.warehouseId, notes: input.notes, receivedBy: req.user!.id } })
     for (const received of input.lines) {

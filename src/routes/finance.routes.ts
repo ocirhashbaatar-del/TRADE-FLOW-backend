@@ -28,7 +28,7 @@ router.get('/invoices/:id/pdf', async (req, res) => {
   const doc = new PDFDocument({ margin: 42 }), chunks: Buffer[] = []
   doc.on('data', (chunk) => chunks.push(chunk)); doc.on('end', () => res.type('application/pdf').attachment(`${invoice.code}.pdf`).send(Buffer.concat(chunks)))
   doc.fontSize(22).text('TradeFlow Invoice').moveDown().fontSize(11).text(`Invoice: ${invoice.code}`).text(`Customer: ${customer?.name ?? order.user.name}`).text(`Payment term: ${customer ? `Credit, due ${invoice.dueDate?.toISOString().slice(0, 10) ?? 'on demand'}` : 'Prepaid'}`).text(`Contract/group: ${customer?.groupCode ?? 'Retail'}`).moveDown()
-  for (const line of order.items) { const gross = Number(line.unitPrice) * line.quantity, vat = gross * Number(line.product.vatRate) / (100 + Number(line.product.vatRate)); doc.text(`${line.product.name} | ${line.quantity} x ${Number(line.unitPrice).toLocaleString()} | VAT ${Number(line.product.vatRate)}%: ${vat.toFixed(2)} | Gross: ${gross.toFixed(2)}`) }
+  for (const line of order.items) doc.text(`${line.product.name} | ${line.quantity} x ${Number(line.unitPrice).toLocaleString()} | Discount ${Number(line.discountAmount).toFixed(2)} | VAT ${Number(line.vatRate)}%: ${Number(line.vatAmount).toFixed(2)} | Gross: ${Number(line.grossAmount).toFixed(2)}`)
   doc.moveDown().text(`Subtotal: ${Number(invoice.subtotal).toFixed(2)}`).text(`VAT total: ${Number(invoice.vat).toFixed(2)}`).fontSize(14).text(`TOTAL: ${Number(invoice.total).toFixed(2)}`); doc.end()
 })
 
@@ -45,10 +45,11 @@ router.post('/invoices/from-order/:orderId', async (req, res) => {
   const order = await prisma.order.findFirst({ where: { id: req.params.orderId, tenantId }, include: { items: { include: { product: true } } } })
   if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })
   const old = await prisma.invoice.findFirst({ where: { tenantId, orderId: order.id } }); if (old) return res.json(old)
-  const vat = order.items.reduce((sum, line) => sum + Number(line.unitPrice) * line.quantity * Number(line.product.vatRate) / (100 + Number(line.product.vatRate)), 0)
+  const vat = order.items.reduce((sum, line) => sum + Number(line.vatAmount), 0)
+  const customer = await prisma.customerAccount.findFirst({ where: { tenantId, userId: order.userId } })
   const invoice = await prisma.$transaction(async (tx) => {
     await assertPeriodOpen(tx, tenantId)
-    const row = await tx.invoice.create({ data: { tenantId, orderId: order.id, code: `INV-${Date.now()}`, subtotal: order.subtotal, vat, total: order.total, dueDate: new Date(Date.now() + 30 * 86400000) } })
+    const row = await tx.invoice.create({ data: { tenantId, orderId: order.id, code: `INV-${Date.now()}`, subtotal: order.subtotal, vat, total: order.total, dueDate: new Date(Date.now() + 30 * 86400000), contractNumber: customer?.registrationNo, paymentTerms: customer ? 'CREDIT_30_DAYS' : 'PREPAID' } })
     const period = row.createdAt.toISOString().slice(0, 7)
     await tx.financialEntry.createMany({ data: [
       { tenantId, account: 'ACCOUNTS_RECEIVABLE', reference: row.code, debit: row.total, period, createdBy: req.user!.id },
@@ -66,6 +67,7 @@ router.post('/payments', async (req, res) => {
   const result = await prisma.$transaction((tx) => postPayment(tx, { ...input, tenantId, recordedBy: req.user!.id }), { isolationLevel: 'Serializable' })
   res.status(result.idempotent ? 200 : 201).json(result)
 })
+router.post('/returns/:id/refund', async (req, res) => { const input = z.object({ method: z.enum(['BANK', 'CASH', 'CUSTOMER_CREDIT']), reference: z.string().min(3) }).parse(req.body), tenantId = tid(req), id = String(req.params.id); const row = await prisma.$transaction(async (tx) => { const request = await tx.returnRequest.findFirst({ where: { id, tenantId, status: 'APPROVED' } }); if (!request?.creditNoteId) throw Object.assign(new Error('Батлагдсан credit note-той буцаалт олдсонгүй.'), { status: 404 }); if (await tx.refund.findFirst({ where: { tenantId, returnRequestId: id } })) throw Object.assign(new Error('Энэ буцаалтын refund өмнө үүссэн.'), { status: 409 }); const note = await tx.creditNote.findFirstOrThrow({ where: { id: request.creditNoteId, tenantId } }); await assertPeriodOpen(tx, tenantId); const refund = await tx.refund.create({ data: { tenantId, returnRequestId: id, amount: note.total, method: input.method, reference: input.reference, status: 'PROCESSED', processedBy: req.user!.id, processedAt: new Date() } }); const period = refund.createdAt.toISOString().slice(0, 7); await tx.financialEntry.createMany({ data: [{ tenantId, account: 'CUSTOMER_CREDIT', reference: input.reference, debit: note.total, period, createdBy: req.user!.id }, { tenantId, account: input.method === 'CUSTOMER_CREDIT' ? 'CUSTOMER_CREDIT_LIABILITY' : input.method, reference: input.reference, credit: note.total, period, createdBy: req.user!.id }] }); return refund }); await audit(req, 'REFUND', 'ReturnRequest', id, undefined, row); res.status(201).json(row) })
 
 router.get('/receivables/aging', async (req, res) => {
   const invoices = await prisma.invoice.findMany({ where: { tenantId: tid(req), status: { in: ['OPEN', 'PARTIAL'] } } })

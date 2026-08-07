@@ -181,6 +181,7 @@ model Category {
   image     String?
   tenantId  String?
   parentId  String?
+  sortOrder Int       @default(0)
   products  Product[]
   createdAt DateTime  @default(now())
 
@@ -222,6 +223,7 @@ model Product {
   orderItems   OrderItem[]
   cartItems    CartItem[]
   savedBy      SavedProduct[]
+  productImages ProductImage[]
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
@@ -231,6 +233,22 @@ model Product {
   @@index([vendorId])
   @@index([name])
   @@index([tenantId, active])
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  tenantId  String
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  publicId  String?
+  alt       String?
+  sortOrder Int      @default(0)
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, productId, url])
+  @@index([tenantId, productId, sortOrder])
 }
 
 model CartItem {
@@ -352,6 +370,11 @@ model OrderItem {
   quantity            Int
   unitPrice           Decimal         @db.Decimal(12, 2)
   appliedPriceSource  String          @default("RETAIL")
+  grossAmount         Decimal         @default(0) @db.Decimal(12, 2)
+  discountAmount      Decimal         @default(0) @db.Decimal(12, 2)
+  vatRate             Decimal         @default(0) @db.Decimal(5, 2)
+  vatAmount           Decimal         @default(0) @db.Decimal(12, 2)
+  netAmount           Decimal         @default(0) @db.Decimal(12, 2)
   shippedQuantity     Int             @default(0)
   returnedQuantity    Int             @default(0)
   backorderedQuantity Int             @default(0)
@@ -560,6 +583,24 @@ model Warehouse {
   @@index([tenantId])
 }
 
+model WarehouseLocation {
+  id          String   @id @default(cuid())
+  tenantId    String
+  warehouseId String
+  code        String
+  zone        String?
+  aisle       String?
+  rack        String?
+  bin         String?
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([tenantId, warehouseId, code])
+  @@index([tenantId, warehouseId, sortOrder])
+}
+
 model InventoryBalance {
   id           String   @id @default(cuid())
   tenantId     String
@@ -698,6 +739,34 @@ model Shipment {
   @@index([tenantId, orderId])
 }
 
+model ShipmentEvent {
+  id         String   @id @default(cuid())
+  tenantId   String
+  shipmentId String
+  status     String
+  note       String?
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, shipmentId, createdAt])
+}
+
+model DeliveryManifest {
+  id            String   @id @default(cuid())
+  tenantId      String
+  code          String
+  partnerCode   String
+  shipmentIds   String[]
+  status        String   @default("DRAFT")
+  handedOffBy   String?
+  handedOffAt   DateTime?
+  createdBy     String
+  createdAt     DateTime @default(now())
+
+  @@unique([tenantId, code])
+  @@index([tenantId, status, createdAt])
+}
+
 model ShipmentLine {
   id          String   @id @default(cuid())
   tenantId    String
@@ -799,12 +868,26 @@ model GoodsReceipt {
   status          String             @default("POSTED")
   notes           String?
   receivedBy      String
+  reviewedBy      String?
+  reviewedAt      DateTime?
   receivedAt      DateTime           @default(now())
   lines           GoodsReceiptLine[]
   createdAt       DateTime           @default(now())
 
   @@unique([tenantId, code])
   @@index([tenantId, purchaseOrderId, receivedAt])
+}
+
+model GoodsReceiptAttachment {
+  id             String   @id @default(cuid())
+  tenantId       String
+  goodsReceiptId String
+  url            String
+  mimeType       String
+  createdBy      String
+  createdAt      DateTime @default(now())
+
+  @@index([tenantId, goodsReceiptId])
 }
 
 model GoodsReceiptLine {
@@ -849,11 +932,58 @@ model Invoice {
   total     Decimal   @db.Decimal(12, 2)
   status    String    @default("OPEN")
   dueDate   DateTime?
+  contractNumber String?
+  paymentTerms   String?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
   @@unique([tenantId, code])
   @@index([tenantId, status])
+}
+
+model ReminderDeliveryLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  invoiceId String
+  channel   String
+  recipient String
+  status    String
+  error     String?
+  sentAt    DateTime @default(now())
+  createdBy String?
+
+  @@index([tenantId, invoiceId, sentAt])
+}
+
+model Refund {
+  id              String   @id @default(cuid())
+  tenantId        String
+  returnRequestId String
+  paymentId       String?
+  amount          Decimal  @db.Decimal(12, 2)
+  method          String
+  reference       String
+  status          String   @default("PENDING")
+  processedBy     String?
+  processedAt     DateTime?
+  createdAt       DateTime @default(now())
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, returnRequestId])
+}
+
+model SavedOrderTemplate {
+  id         String   @id @default(cuid())
+  tenantId   String
+  customerId String
+  name       String
+  lines      Json
+  createdBy  String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([tenantId, customerId, name])
+  @@index([tenantId, customerId])
 }
 
 model CreditNote {
