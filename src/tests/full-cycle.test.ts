@@ -43,10 +43,12 @@ afterAll(async () => {
 
 describe('full purchase→receipt→inventory→order→shipment→invoice→payment→report cycle', () => {
   it('runs the whole cycle and keeps ledger == inventory with 0 diff', async () => {
-    // 1. Purchase order
-    const po = await prisma.purchaseOrder.create({ data: { tenantId, code: `PO-${stamp}`, supplierId, warehouseId, status: 'SENT', createdBy: userId, lines: { create: { tenantId, productId, orderedQty: 10, unitCost: 300 } } }, include: { lines: true } })
-    // 2. Goods receipt
-    const receipt = await prisma.goodsReceipt.create({ data: { tenantId, code: `GR-${stamp}`, purchaseOrderId: po.id, supplierId, warehouseId, receivedBy: userId, lines: { create: { tenantId, purchaseOrderLineId: po.lines[0]!.id, productId, expectedQuantity: 10, receivedQuantity: 10, acceptedQuantity: 10, discrepancyQuantity: 0, unitCost: 300 } } } })
+    // 1. Purchase order + line (purchase-order model has no `lines` relation, create separately)
+    const po = await prisma.purchaseOrder.create({ data: { tenantId, code: `PO-${stamp}`, supplierId, warehouseId, status: 'SENT', createdBy: userId } })
+    const poLine = await prisma.purchaseOrderLine.create({ data: { tenantId, purchaseOrderId: po.id, productId, orderedQty: 10, unitCost: 300 } })
+    // 2. Goods receipt + line
+    const receipt = await prisma.goodsReceipt.create({ data: { tenantId, code: `GR-${stamp}`, purchaseOrderId: po.id, supplierId, warehouseId, receivedBy: userId } })
+    await prisma.goodsReceiptLine.create({ data: { tenantId, goodsReceiptId: receipt.id, purchaseOrderLineId: poLine.id, productId, expectedQuantity: 10, receivedQuantity: 10, acceptedQuantity: 10, discrepancyQuantity: 0, unitCost: 300 } })
     expect(receipt.id).toBeTruthy()
     // 3. Inventory movement (receipt)
     await prisma.$transaction((tx) => applyStockMovement(tx, { tenantId, warehouseId, productId, type: StockMovementType.RECEIPT, quantity: 10, unitCost: 300, reference: receipt.code, createdBy: userId }))
@@ -83,4 +85,3 @@ describe('full purchase→receipt→inventory→order→shipment→invoice→pay
     expect(Array.isArray(report.body.inventoryTurnover)).toBe(true)
   })
 })
-

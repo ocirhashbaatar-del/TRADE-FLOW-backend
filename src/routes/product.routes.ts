@@ -34,14 +34,36 @@ router.get('/', optionalAuthenticate, async (req, res) => {
   const customer = req.user?.tenantId === selectedTenant.id ? await prisma.customerAccount.findFirst({ where: tenantWhere(selectedTenant.id, { userId: req.user.id, active: true }) }) : null
   const key = `products:${selectedTenant.id}:${query.q ?? ''}:${query.category ?? ''}`
   if (!customer) { const cached = await cacheGet(key); if (cached) return res.json(cached) }
-  const result = await prisma.$transaction(async (tx) => {
-    const products = await tx.product.findMany({ where: tenantWhere(selectedTenant.id, { active: true, channel: { in: [ProductChannel.BOTH, ProductChannel.B2C] }, ...(query.q ? { OR: [{ name: { contains: query.q, mode: 'insensitive' as const } }, { description: { contains: query.q, mode: 'insensitive' as const } }] } : {}), ...(query.category ? { category: { slug: query.category, tenantId: selectedTenant.id } } : {}) }), include: { category: true, vendor: true }, orderBy: [{ featured: 'desc' }, { createdAt: 'desc' }] })
-    const balances = await tx.inventoryBalance.groupBy({ by: ['productId'], where: { tenantId: selectedTenant.id, productId: { in: products.map((product) => product.id) } }, _sum: { onHand: true, reserved: true } })
-    return Promise.all(products.map(async (product) => { const balance = balances.find((row) => row.productId === product.id); return shape({ ...product, availableStock: Math.max(0, Number(balance?._sum.onHand ?? 0) - Number(balance?._sum.reserved ?? 0)) }, await resolvePrice(tx, { tenantId: selectedTenant.id, productId: product.id, quantity: 1, customerId: customer?.id, groupCode: customer?.groupCode ?? undefined })) }))
+
+  const now = new Date()
+  const products = await prisma.product.findMany({ where: tenantWhere(selectedTenant.id, { active: true, channel: { in: [ProductChannel.BOTH, ProductChannel.B2C] }, ...(query.q ? { OR: [{ name: { contains: query.q, mode: 'insensitive' as const } }, { description: { contains: query.q, mode: 'insensitive' as const } }] } : {}), ...(query.category ? { category: { slug: query.category, tenantId: selectedTenant.id } } : {}) }), include: { category: true, vendor: true }, orderBy: [{ featured: 'desc' }, { createdAt: 'desc' }] })
+  const productIds = products.map((product) => product.id)
+  const categoryIds = [...new Set(products.map((product) => product.categoryId))]
+
+  const [balances, rules, promotions] = await Promise.all([
+    prisma.inventoryBalance.groupBy({ by: ['productId'], where: { tenantId: selectedTenant.id, productId: { in: productIds } }, _sum: { onHand: true, reserved: true } }),
+    prisma.priceRule.findMany({ where: { tenantId: selectedTenant.id, productId: { in: productIds }, active: true, variantId: null, minQuantity: { lte: 1 }, AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] }, { OR: [{ endsAt: null }, { endsAt: { gte: now } }] }] }, orderBy: [{ priority: 'desc' }, { minQuantity: 'desc' }] }),
+    prisma.promotion.findMany({ where: { tenantId: selectedTenant.id, active: true, minQuantity: { lte: 1 }, OR: [{ productId: { in: productIds } }, { categoryId: { in: categoryIds } }], startsAt: { lte: now }, endsAt: { gte: now } }, orderBy: { discountPct: 'desc' } }),
+  ])
+
+  const result = products.map((product) => {
+    const balance = balances.find((row) => row.productId === product.id)
+    const productRules = rules.filter((rule) => rule.productId === product.id)
+    const selected = productRules.find((rule) => customer?.id && rule.customerId === customer.id)
+      ?? productRules.find((rule) => customer?.groupCode && rule.groupCode === customer.groupCode)
+      ?? productRules.find((rule) => !rule.customerId && !rule.groupCode)
+    const basePrice = Number(selected?.price ?? product.price)
+    const promotion = promotions.find((promo) => promo.productId === product.id || promo.categoryId === product.categoryId)
+    const discounted = promotion ? Math.max(0, basePrice - (promotion.discountAmt ? Number(promotion.discountAmt) : basePrice * Number(promotion.discountPct ?? 0) / 100)) : basePrice
+    const ruleType = selected?.customerId ? 'CONTRACT' : selected?.groupCode ? 'GROUP' : 'TIER'
+    const priceSource = promotion ? `PROMOTION:${promotion.id}` : selected ? `RULE:${ruleType}:${selected.id}` : 'RETAIL'
+    return shape({ ...product, availableStock: Math.max(0, Number(balance?._sum.onHand ?? 0) - Number(balance?._sum.reserved ?? 0)) }, { price: discounted, source: priceSource })
   })
+
   if (!customer) await cacheSet(key, result)
   res.json(result)
 })
+
 router.get('/:id', optionalAuthenticate, async (req, res) => {
   const query = z.object({ tenant: z.string().optional(), quantity: z.coerce.number().int().positive().default(1), variantId: z.string().optional(), channel: z.enum(['B2C', 'B2B']).default('B2C') }).parse(req.query)
   const selectedTenant = query.tenant ? await prisma.tenant.findFirst({ where: { slug: query.tenant, active: true } }) : await findStorefrontTenant(req.hostname)
