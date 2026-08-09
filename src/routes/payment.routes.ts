@@ -15,7 +15,7 @@ import { assertPeriodOpen } from '../lib/period-lock.js'
 import { isEnabled } from '../lib/feature-flags.js'
 
 const router = Router()
-const stripeCurrency = (env.STRIPE_CURRENCY || 'usd').toLowerCase()
+const stripeCurrency = (env.STRIPE_CURRENCY || 'mnt').toLowerCase()
 
 router.post('/intent', authenticate, async (req, res) => {
   if (!isEnabled('stripe') || !stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй.' })
