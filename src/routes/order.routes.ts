@@ -26,12 +26,15 @@ router.post('/', async (req, res) => {
   const variants = requestedVariantIds.length ? await prisma.productVariant.findMany({ where: { id: { in: requestedVariantIds }, tenantId, active: true } }) : []
   if (requestedVariantIds.some((id) => !variants.some((variant) => variant.id === id && input.items.some((item) => item.variantId === id && item.productId === variant.productId)))) return res.status(400).json({ message: 'Зарим бүтээгдэхүүний хувилбар буруу байна.' })
   const trackingToken = crypto.randomBytes(32).toString('hex')
+  const requestedCustomer = input.customerId ? await prisma.customerAccount.findFirst({ where: { id: input.customerId, tenantId, active: true } }) : null
+  const customer = input.channel === 'B2B' ? requestedCustomer ?? await prisma.customerAccount.findFirst({ where: { tenantId, userId: req.user!.id, active: true } }) : null
+  const priced = await Promise.all(input.items.map(async (item) => {
+    const priceResult = await prisma.$transaction(async (tx) => resolvePrice(tx, { tenantId, productId: item.productId, variantId: item.variantId, quantity: item.quantity, customerId: customer?.id, groupCode: customer?.groupCode ?? undefined }), { maxWait: 10000, timeout: 15000 })
+    return { ...item, ...priceResult }
+  }))
+  const subtotal = priced.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
   const order = await prisma.$transaction(async (tx) => {
-    const requestedCustomer = input.customerId ? await tx.customerAccount.findFirst({ where: { id: input.customerId, tenantId, active: true } }) : null
     if (input.customerId && !['ADMIN', 'MANAGER', 'EMPLOYEE'].includes(req.user!.role)) throw Object.assign(new Error('Гар захиалга үүсгэх эрхгүй.'), { status: 403 })
-    const customer = input.channel === 'B2B' ? requestedCustomer ?? await tx.customerAccount.findFirst({ where: { tenantId, userId: req.user!.id, active: true } }) : null
-    const priced = await Promise.all(input.items.map(async (item) => ({ ...item, ...(await resolvePrice(tx, { tenantId, productId: item.productId, variantId: item.variantId, quantity: item.quantity, customerId: customer?.id, groupCode: customer?.groupCode ?? undefined })) })))
-    const subtotal = priced.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
     const zone = input.deliveryZoneId ? await tx.deliveryZone.findFirst({ where: { id: input.deliveryZoneId, tenantId, active: true, city: { equals: input.city, mode: 'insensitive' }, districts: { has: input.district } } }) : null
     if (input.deliveryZoneId && !zone) throw Object.assign(new Error('Сонгосон хүргэлтийн бүс хаягтай тохирохгүй.'), { status: 400 })
     const deliveryFee = Number(zone?.fee ?? 180)
@@ -71,7 +74,7 @@ router.post('/', async (req, res) => {
       await tx.stockReservation.create({ data: { tenantId, orderId: created.id, ...reservation, expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000) } })
     }
     return created
-  }, { isolationLevel: 'Serializable' })
+  }, { isolationLevel: 'Serializable', maxWait: 10000, timeout: 30000 })
   await audit(req, 'CREATE', 'Order', order.id, undefined, order)
   const staffRecipients = await prisma.user.findMany({
     where: { tenantId, role: { in: [Role.ADMIN, Role.MANAGER] } },
