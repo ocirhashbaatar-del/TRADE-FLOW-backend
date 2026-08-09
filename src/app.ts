@@ -27,6 +27,7 @@ import deliveryRoutes from './routes/delivery.routes.js'
 import adminRoutes from './routes/admin.routes.js'
 import catalogRoutes from './routes/catalog.routes.js'
 import shoppingRoutes from './routes/shopping.routes.js'
+import transportRoutes from './routes/transport.routes.js'
 import commerceRoutes from './routes/commerce.routes.js'
 import platformExportRoutes from './routes/platform-export.routes.js'
 import { errorHandler, notFound } from './middleware/error.js'
@@ -68,6 +69,7 @@ app.use('/api/v1/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standar
 app.use('/api/v1/products', productRoutes)
 app.use('/api/v1/categories', categoryRoutes)
 app.use('/api/v1/shopping', shoppingRoutes)
+app.use('/api/v1/transport', transportRoutes)
 app.use('/api/v1/orders', checkoutRateLimit, orderRoutes)
 app.use('/api/v1/payments', qpayCallbackRateLimit, paymentRoutes)
 app.use('/api/v1/notifications', notificationRoutes)

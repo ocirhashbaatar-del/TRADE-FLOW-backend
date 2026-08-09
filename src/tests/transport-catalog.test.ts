@@ -51,7 +51,7 @@ describe('transporter catalog workflow', () => {
     }).expect(201)
 
     expect(response.body.ok).toBe(true)
-    const notifications = await prisma.notification.findMany({ where: { userId: adminId, title: { contains: 'Тээвэрлэгчийн бүртгэл' } } })
+    const notifications = await prisma.notification.findMany({ where: { userId: adminId, title: { contains: 'Тээвэрчийн захиалга' } } })
     expect(notifications.length).toBeGreaterThan(0)
   })
 })
