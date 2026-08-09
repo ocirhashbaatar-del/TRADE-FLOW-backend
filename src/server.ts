@@ -13,7 +13,7 @@ async function start() {
   await prisma.$connect()
   await connectRedis()
   await startJobQueue()
-  server.listen(env.PORT, () => console.log(`TradeFlow API: http://localhost:${env.PORT}\nSwagger: http://localhost:${env.PORT}/api/docs`))
+  server.listen(env.PORT, '0.0.0.0', () => console.log(`TradeFlow API: http://localhost:${env.PORT}\nSwagger: http://localhost:${env.PORT}/api/docs`))
 }
 
 async function shutdown(signal: string) {
