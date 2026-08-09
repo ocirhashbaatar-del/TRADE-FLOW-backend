@@ -15,12 +15,14 @@ import { assertPeriodOpen } from '../lib/period-lock.js'
 import { isEnabled } from '../lib/feature-flags.js'
 
 const router = Router()
+const stripeCurrency = (env.STRIPE_CURRENCY || 'usd').toLowerCase()
+
 router.post('/intent', authenticate, async (req, res) => {
   if (!isEnabled('stripe') || !stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй.' })
   const { orderId } = z.object({ orderId: z.string() }).parse(req.body)
   const order = await prisma.order.findFirst({ where: { id: orderId, userId: req.user!.id } })
   if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })
-  const intent = await stripe.paymentIntents.create({ amount: Math.round(Number(order.total) * 100), currency: 'mnt', metadata: { orderId: order.id, userId: req.user!.id }, automatic_payment_methods: { enabled: true } })
+  const intent = await stripe.paymentIntents.create({ amount: Math.round(Number(order.total) * 100), currency: stripeCurrency, metadata: { orderId: order.id, userId: req.user!.id }, automatic_payment_methods: { enabled: true } })
   await prisma.order.update({ where: { id: order.id }, data: { stripePaymentId: intent.id } })
   res.json({ clientSecret: intent.client_secret })
 })
@@ -32,10 +34,11 @@ router.post('/checkout-session', authenticate, async (req, res) => {
   const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173'
   const session = await stripe.checkout.sessions.create({
     mode: 'payment',
+    payment_method_types: ['card'],
     customer_email: req.user!.email.includes('@guest.tradeflow.local') ? undefined : req.user!.email,
     line_items: [
-      ...order.items.map((item) => ({ quantity: item.quantity, price_data: { currency: 'mnt', unit_amount: Math.round(Number(item.unitPrice) * 100), product_data: { name: item.product.name } } })),
-      ...(Number(order.deliveryFee) > 0 ? [{ quantity: 1, price_data: { currency: 'mnt', unit_amount: Math.round(Number(order.deliveryFee) * 100), product_data: { name: 'Хүргэлтийн төлбөр' } } }] : []),
+      ...order.items.map((item) => ({ quantity: item.quantity, price_data: { currency: stripeCurrency, unit_amount: Math.round(Number(item.unitPrice) * 100), product_data: { name: item.product.name } } })),
+      ...(Number(order.deliveryFee) > 0 ? [{ quantity: 1, price_data: { currency: stripeCurrency, unit_amount: Math.round(Number(order.deliveryFee) * 100), product_data: { name: 'Хүргэлтийн төлбөр' } } }] : []),
     ],
     metadata: { orderId: order.id, userId: req.user!.id },
     success_url: `${frontendUrl}/orders?payment=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -44,6 +47,43 @@ router.post('/checkout-session', authenticate, async (req, res) => {
   await prisma.order.update({ where: { id: order.id }, data: { stripePaymentId: session.id } })
   res.status(201).json({ url: session.url })
 })
+router.post('/webhook', async (req, res) => {
+  if (!stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй байна.' })
+  const signature = req.headers['stripe-signature']
+  const secret = env.STRIPE_WEBHOOK_SECRET
+  const payload = (req as typeof req & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}))
+  const signatureValue = Array.isArray(signature) ? signature[0] : signature
+
+  try {
+    const event = secret && signatureValue
+      ? stripe.webhooks.constructEvent(payload, signatureValue, secret)
+      : {
+          id: req.body?.id ?? 'dev-webhook',
+          type: req.body?.type ?? 'checkout.session.completed',
+          data: { object: req.body?.data?.object ?? req.body },
+        }
+
+    const object = (event.data?.object ?? req.body?.data?.object ?? req.body) as { metadata?: { orderId?: string }; payment_status?: string; id?: string }
+    const eventType = event.type
+    const orderId = object.metadata?.orderId
+
+    if (eventType === 'checkout.session.completed' || eventType === 'payment_intent.succeeded') {
+      if (!orderId) return res.status(400).json({ message: 'Stripe event-д захиалга олдсонгүй.' })
+      await prisma.$transaction(async (tx) => {
+        const current = await tx.order.findFirstOrThrow({ where: { id: orderId } })
+        await postPayment(tx, { tenantId: current.tenantId!, customerId: current.userId, amount: Number(current.total), method: 'STRIPE', reference: `STRIPE:${object.id ?? 'stripe-webhook'}`, recordedBy: current.userId })
+        await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'SUCCEEDED' } })
+        await transitionOrder(tx, { tenantId: current.tenantId!, orderId, to: OrderStatus.PAID, changedBy: current.userId, reason: 'Stripe төлбөр баталгаажсан' })
+      })
+    }
+
+    res.json({ received: true, type: eventType })
+  } catch (error) {
+    console.error('Stripe webhook failed', error)
+    res.status(400).json({ message: 'Stripe webhook-ийг боловсруулах боломжгүй.' })
+  }
+})
+
 router.post('/checkout-session/confirm', authenticate, async (req, res) => {
   if (!stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй байна.' })
   const { sessionId } = z.object({ sessionId: z.string().min(5) }).parse(req.body)
