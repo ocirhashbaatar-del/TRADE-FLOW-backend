@@ -110,14 +110,31 @@ async function issueTokens(user: { id: string; email: string; role: 'ADMIN' | 'M
 }
 
 async function findOrCreateOAuthUser(provider: string, providerUserId: string, profile: { email: string; name: string; avatar?: string }) {
+  const email = profile.email.trim().toLowerCase()
+  const hasProviderEmail = !email.endsWith('@oauth.tradeflow.local')
   const linked = await prisma.oAuthAccount.findUnique({ where: { provider_providerUserId: { provider, providerUserId } }, include: { user: true } })
-  if (linked) return linked.user
-  const existing = await prisma.user.findUnique({ where: { email: profile.email.toLowerCase() } })
+  if (linked) {
+    if (!hasProviderEmail) {
+      if (linked.user.email.endsWith('@oauth.tradeflow.local')) throw new Error(`${provider === 'facebook' ? 'Facebook' : provider} verified email is required`)
+      return linked.user
+    }
+    const emailOwner = await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
+    if (!emailOwner || emailOwner.id === linked.userId) {
+      return prisma.user.update({ where: { id: linked.userId }, data: { emailVerified: linked.user.emailVerified ?? new Date(), avatar: linked.user.avatar ?? profile.avatar } })
+    }
+    return prisma.$transaction(async (tx) => {
+      await tx.oAuthAccount.deleteMany({ where: { provider, userId: emailOwner.id, id: { not: linked.id } } })
+      await tx.oAuthAccount.update({ where: { id: linked.id }, data: { userId: emailOwner.id } })
+      return tx.user.update({ where: { id: emailOwner.id }, data: { emailVerified: emailOwner.emailVerified ?? new Date(), avatar: emailOwner.avatar ?? profile.avatar } })
+    })
+  }
+  if (!hasProviderEmail) throw new Error(`${provider === 'facebook' ? 'Facebook' : provider} verified email is required`)
+  const existing = await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
   const defaultTenant = await findStorefrontTenant()
   if (!defaultTenant) throw new Error('No active organization is configured')
   const user = existing
     ? await prisma.user.update({ where: { id: existing.id }, data: { emailVerified: existing.emailVerified ?? new Date(), avatar: existing.avatar ?? profile.avatar } })
-    : await prisma.user.create({ data: { name: profile.name, email: profile.email.toLowerCase(), emailVerified: new Date(), avatar: profile.avatar, role: 'CUSTOMER', tenant: defaultTenant.name, tenantId: defaultTenant.id } })
+    : await prisma.user.create({ data: { name: profile.name, email, emailVerified: new Date(), avatar: profile.avatar, role: 'CUSTOMER', tenant: defaultTenant.name, tenantId: defaultTenant.id } })
   await prisma.oAuthAccount.create({ data: { provider, providerUserId, userId: user.id } })
   return user
 }
