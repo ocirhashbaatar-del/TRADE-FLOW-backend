@@ -11,7 +11,7 @@ router.use(authenticate, requireTenant, authorize(Role.TRANSPORTER))
 
 router.get('/', async (req, res) => {
   const orders = await prisma.order.findMany({
-    where: { tenantId: req.user!.tenantId!, status: { in: [OrderStatus.PARTIALLY_SHIPPED, OrderStatus.SHIPPED, OrderStatus.PARTIALLY_DELIVERED, OrderStatus.DELIVERED] } },
+    where: { tenantId: req.user!.tenantId!, status: { in: [OrderStatus.PAID, OrderStatus.CONFIRMED, OrderStatus.PROCESSING, OrderStatus.READY, OrderStatus.PARTIALLY_SHIPPED, OrderStatus.SHIPPED, OrderStatus.PARTIALLY_DELIVERED, OrderStatus.DELIVERED] } },
     include: { items: { include: { product: true } } },
     orderBy: { createdAt: 'desc' },
   })
@@ -19,7 +19,7 @@ router.get('/', async (req, res) => {
 })
 
 router.patch('/:id/status', async (req, res) => {
-  const { status } = z.object({ status: z.enum(['PARTIALLY_DELIVERED', 'DELIVERED']) }).parse(req.body)
+  const { status } = z.object({ status: z.enum(['CONFIRMED', 'PROCESSING', 'READY', 'PARTIALLY_SHIPPED', 'SHIPPED', 'PARTIALLY_DELIVERED', 'DELIVERED']) }).parse(req.body)
   const order = await prisma.order.findFirst({ where: { id: req.params.id, tenantId: req.user!.tenantId! } })
   if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })
   const updated = await prisma.$transaction((tx) => transitionOrder(tx, { tenantId: req.user!.tenantId!, orderId: order.id, to: status as OrderStatus, changedBy: req.user!.id, reason: 'Тээвэрлэгч хүргэлтийн төлөв шинэчилсэн' }))
