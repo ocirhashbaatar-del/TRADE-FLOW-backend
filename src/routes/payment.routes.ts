@@ -31,19 +31,25 @@ router.post('/checkout-session', authenticate, async (req, res) => {
   const { orderId } = z.object({ orderId: z.string() }).parse(req.body)
   const order = await prisma.order.findFirst({ where: { id: orderId, userId: req.user!.id }, include: { items: { include: { product: true } } } })
   if (!order) return res.status(404).json({ message: 'Захиалга олдсонгүй.' })
-  const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173'
-  const session = await stripe.checkout.sessions.create({
-    mode: 'payment',
-    payment_method_types: ['card'],
-    customer_email: req.user!.email.includes('@guest.tradeflow.local') ? undefined : req.user!.email,
-    line_items: [
-      ...order.items.map((item) => ({ quantity: item.quantity, price_data: { currency: stripeCurrency, unit_amount: Math.round(Number(item.unitPrice) * 100), product_data: { name: item.product.name } } })),
-      ...(Number(order.deliveryFee) > 0 ? [{ quantity: 1, price_data: { currency: stripeCurrency, unit_amount: Math.round(Number(order.deliveryFee) * 100), product_data: { name: 'Хүргэлтийн төлбөр' } } }] : []),
-    ],
-    metadata: { orderId: order.id, userId: req.user!.id },
-    success_url: `${frontendUrl}/orders?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${frontendUrl}/checkout?payment=cancelled`,
-  })
+  const frontendUrl = (env.FRONTEND_URL.split(',')[0] ?? 'http://localhost:5173').trim().replace(/\/$/, '')
+  let session
+  try {
+    session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      customer_email: req.user!.email.includes('@guest.tradeflow.local') ? undefined : req.user!.email,
+      line_items: [
+        ...order.items.map((item) => ({ quantity: item.quantity, price_data: { currency: stripeCurrency, unit_amount: Math.round(Number(item.unitPrice) * 100), product_data: { name: item.product.name } } })),
+        ...(Number(order.deliveryFee) > 0 ? [{ quantity: 1, price_data: { currency: stripeCurrency, unit_amount: Math.round(Number(order.deliveryFee) * 100), product_data: { name: 'Хүргэлтийн төлбөр' } } }] : []),
+      ],
+      metadata: { orderId: order.id, userId: req.user!.id },
+      success_url: `${frontendUrl}/orders?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendUrl}/checkout?payment=cancelled`,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Stripe checkout session үүссэнгүй.'
+    throw Object.assign(new Error(`Төлбөрийн үйлчилгээний алдаа: ${message}`), { status: 422 })
+  }
   await prisma.order.update({ where: { id: order.id }, data: { stripePaymentId: session.id } })
   res.status(201).json({ url: session.url })
 })
