@@ -13,9 +13,13 @@ import { checkQPayInvoice, createQPayInvoice, qpayConfigured } from '../lib/qpay
 import { postPayment } from '../lib/payment-posting.js'
 import { assertPeriodOpen } from '../lib/period-lock.js'
 import { isEnabled } from '../lib/feature-flags.js'
+import { notifyTenantRoles } from '../lib/notifications.js'
 
 const router = Router()
 const stripeCurrency = (env.STRIPE_CURRENCY || 'mnt').toLowerCase()
+const notifyTransporters = (order: { id: string; tenantId: string | null; orderNumber: string; recipientName: string }) => order.tenantId
+  ? notifyTenantRoles({ tenantId: order.tenantId, roles: [Role.TRANSPORTER], type: 'SHIPMENT', title: 'Шинэ хүргэлт ирлээ', description: `${order.orderNumber} · ${order.recipientName} · төлбөр баталгаажсан`, key: `paid-delivery:${order.id}` })
+  : Promise.resolve([])
 
 router.post('/intent', authenticate, async (req, res) => {
   if (!isEnabled('stripe') || !stripe) return res.status(503).json({ message: 'Stripe тохиргоо хийгдээгүй.' })
@@ -75,12 +79,14 @@ router.post('/webhook', async (req, res) => {
 
     if (eventType === 'checkout.session.completed' || eventType === 'payment_intent.succeeded') {
       if (!orderId) return res.status(400).json({ message: 'Stripe event-д захиалга олдсонгүй.' })
-      await prisma.$transaction(async (tx) => {
+      const paidOrder = await prisma.$transaction(async (tx) => {
         const current = await tx.order.findFirstOrThrow({ where: { id: orderId } })
         await postPayment(tx, { tenantId: current.tenantId!, customerId: current.userId, amount: Number(current.total), method: 'STRIPE', reference: `STRIPE:${object.id ?? 'stripe-webhook'}`, recordedBy: current.userId })
         await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'SUCCEEDED' } })
         await transitionOrder(tx, { tenantId: current.tenantId!, orderId, to: OrderStatus.PAID, changedBy: current.userId, reason: 'Stripe төлбөр баталгаажсан' })
+        return current
       })
+      await notifyTransporters(paidOrder)
     }
 
     res.json({ received: true, type: eventType })
@@ -102,6 +108,7 @@ router.post('/checkout-session/confirm', authenticate, async (req, res) => {
     await tx.order.update({ where: { id: session.metadata!.orderId! }, data: { paymentStatus: 'SUCCEEDED' } })
     return transitionOrder(tx, { tenantId: req.user!.tenantId!, orderId: session.metadata!.orderId!, to: OrderStatus.PAID, changedBy: req.user!.id, reason: 'Stripe төлбөр баталгаажсан' })
   })
+  await notifyTransporters(order)
   res.json({ paid: true, orderId: order.id })
 })
 
@@ -143,13 +150,15 @@ router.post('/qpay/callback', async (req, res) => {
   if (current.status === 'PAID') return res.json({ idempotent: true, status: current.status })
   const verified = await checkQPayInvoice(current.invoiceId)
   if (!verified.paid || verified.paidAmount < Number(current.amount)) return res.status(409).json({ message: 'QPay төлбөр бүрэн баталгаажаагүй байна.' })
-  await prisma.$transaction(async (tx) => {
+  const paidOrder = await prisma.$transaction(async (tx) => {
     const row = await tx.qPayPayment.update({ where: { id: current.id }, data: { paymentId: verified.paymentId, status: 'PAID', callbackRaw: verified.raw, paidAt: new Date() } })
     const order = await tx.order.findUniqueOrThrow({ where: { id: row.orderId } })
     await postPayment(tx, { tenantId: order.tenantId!, customerId: order.userId, amount: Number(row.amount), method: 'QPAY', reference: `QPAY:${row.paymentId ?? row.invoiceId}` })
     await tx.order.update({ where: { id: order.id }, data: { paymentStatus: 'SUCCEEDED' } })
     await transitionOrder(tx, { tenantId: order.tenantId!, orderId: order.id, to: OrderStatus.PAID, reason: 'QPay төлбөр баталгаажсан' })
+    return order
   })
+  await notifyTransporters(paidOrder)
   res.json({ idempotent: false, status: 'PAID' })
 })
 router.post('/bank-transfers', authenticate, requireTenant, async (req, res) => {
@@ -179,9 +188,10 @@ router.post('/bank-transfers/:id/approve', authenticate, requireTenant, authoriz
         await transitionOrder(tx, { tenantId: current.tenantId, orderId: order.id, to: OrderStatus.PAID, changedBy: req.user!.id, reason: 'Банкны шилжүүлэг баталгаажсан' })
       }
     }
-    return row
+    return { row, paidOrder: current.orderId ? await tx.order.findUnique({ where: { id: current.orderId } }) : null }
   }, { isolationLevel: 'Serializable' })
-  res.json(result)
+  if (result.paidOrder?.status === OrderStatus.PAID) await notifyTransporters(result.paidOrder)
+  res.json(result.row)
 })
 router.post('/bank-transfers/:id/reject', authenticate, requireTenant, authorize(Role.ADMIN, Role.MANAGER, Role.ACCOUNTANT), async (req, res) => {
   const { reason } = z.object({ reason: z.string().min(3) }).parse(req.body)

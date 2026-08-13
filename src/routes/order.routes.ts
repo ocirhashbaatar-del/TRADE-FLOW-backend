@@ -8,7 +8,6 @@ import { resolvePrice } from '../lib/price-resolver.js'
 import { audit } from '../lib/audit.js'
 import { notifyUser } from '../socket.js'
 import { sendMail } from '../lib/services.js'
-import { allowedOrderTransitions, transitionOrder } from '../lib/order-state.js'
 import { hashToken } from '../utils/auth.js'
 
 const router = Router()
@@ -99,11 +98,5 @@ router.get('/:id', async (req, res) => {
   const staff = ['ADMIN', 'MANAGER', 'EMPLOYEE', 'TRANSPORTER', 'ACCOUNTANT'].includes(req.user!.role)
   const order = await prisma.order.findFirst({ where: { id: req.params.id, tenantId: req.user!.tenantId!, ...(staff ? {} : { userId: req.user!.id }) }, include: { items: { include: { product: true } }, statusHistory: { orderBy: { createdAt: 'asc' } } } })
   order ? res.json(order) : res.status(404).json({ message: 'Захиалга олдсонгүй.' })
-})
-router.patch('/:id/status', authorize(Role.ADMIN, Role.MANAGER, Role.EMPLOYEE, Role.TRANSPORTER), async (req, res) => {
-  const input = z.object({ status: z.nativeEnum(OrderStatus), reason: z.string().min(3).optional() }).parse(req.body)
-  const row = await prisma.$transaction((tx) => transitionOrder(tx, { tenantId: req.user!.tenantId!, orderId: String(req.params.id), to: input.status, reason: input.reason, changedBy: req.user!.id }))
-  await audit(req, 'UPDATE_STATUS', 'Order', row.id, undefined, { status: row.status })
-  res.json({ ...row, allowedTransitions: allowedOrderTransitions(row.status) })
 })
 export default router
