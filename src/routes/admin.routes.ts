@@ -10,7 +10,6 @@ import { hashToken } from '../utils/auth.js'
 import { resolveTxt } from 'node:dns/promises'
 import { jobQueueHealth } from '../lib/job-queue.js'
 import { attachVercelDomain } from '../lib/vercel-domain.js'
-import { assertSubscriptionCapacity } from '../lib/subscription.js'
 
 const router = Router()
 router.use(authenticate)
@@ -87,7 +86,7 @@ router.post('/invitations', async (req, res) => {
   const input = z.object({ name: z.string().min(2), email: z.email(), role: z.nativeEnum(Role).refine((role) => role !== Role.CUSTOMER) }).parse(req.body)
   const email = input.email.toLowerCase()
   const existingUser = await prisma.user.findUnique({ where: { email }, select: { id: true } })
-  if (!existingUser) await prisma.$transaction((tx) => assertSubscriptionCapacity(tx, tenantId(req), 'users'))
+  if (existingUser) return res.status(409).json({ message: 'Энэ email-ээр хэрэглэгч аль хэдийн бүртгэлтэй байна. Users хэсгээс role-ийг нь өөрчилнө үү.' })
   const raw = crypto.randomBytes(32).toString('hex')
   const invitation = await prisma.staffInvitation.upsert({ where: { tenantId_email: { tenantId: tenantId(req), email } }, update: { ...input, email, tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + 7 * 86400000), acceptedAt: null, invitedBy: req.user!.id }, create: { ...input, email, tenantId: tenantId(req), tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + 7 * 86400000), invitedBy: req.user!.id } })
   const link = `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/auth/accept-invite?token=${raw}`

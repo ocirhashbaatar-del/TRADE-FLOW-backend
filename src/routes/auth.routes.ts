@@ -88,14 +88,19 @@ router.post('/guest', async (req, res) => {
 
 router.post('/accept-invite', async (req, res) => {
   const input = z.object({ token: z.string().min(32), password: z.string().min(8) }).parse(req.body)
-  const invitation = await prisma.staffInvitation.findUnique({ where: { tokenHash: hashToken(input.token) } })
-  if (!invitation || invitation.acceptedAt || invitation.expiresAt < new Date()) return res.status(400).json({ message: 'Урилга хүчингүй эсвэл хугацаа дууссан.' })
-  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: invitation.tenantId } })
-  const existingInviteUser = await prisma.user.findUnique({ where: { email: invitation.email } })
-  if (!existingInviteUser) await prisma.$transaction((tx) => assertSubscriptionCapacity(tx, tenant.id, 'users'))
-  const user = await prisma.user.upsert({ where: { email: invitation.email }, update: { name: invitation.name, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash: await bcrypt.hash(input.password, 12) }, create: { name: invitation.name, email: invitation.email, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash: await bcrypt.hash(input.password, 12), emailVerified: new Date() } })
-  await prisma.refreshToken.deleteMany({ where: { userId: user.id } })
-  await prisma.staffInvitation.update({ where: { id: invitation.id }, data: { acceptedAt: new Date() } })
+  const tokenHash = hashToken(input.token)
+  const passwordHash = await bcrypt.hash(input.password, 12)
+  const user = await prisma.$transaction(async (tx) => {
+    const invitation = await tx.staffInvitation.findUnique({ where: { tokenHash } })
+    if (!invitation || invitation.acceptedAt || invitation.expiresAt < new Date()) throw Object.assign(new Error('Урилга хүчингүй эсвэл хугацаа дууссан байна.'), { status: 400 })
+    const tenant = await tx.tenant.findUnique({ where: { id: invitation.tenantId } })
+    if (!tenant?.active) throw Object.assign(new Error('Урилгын байгууллага идэвхгүй байна.'), { status: 409 })
+    const existingUser = await tx.user.findUnique({ where: { email: invitation.email } })
+    if (existingUser) throw Object.assign(new Error('Энэ email-ээр хэрэглэгч аль хэдийн бүртгэлтэй байна. Нэвтрэх эсвэл админтай холбогдоно уу.'), { status: 409 })
+    const created = await tx.user.create({ data: { name: invitation.name, email: invitation.email, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash, emailVerified: new Date() } })
+    await tx.staffInvitation.update({ where: { id: invitation.id }, data: { acceptedAt: new Date() } })
+    return created
+  })
   const tokens = await issueTokens(user)
   res.json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
 })
