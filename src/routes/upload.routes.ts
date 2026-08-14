@@ -27,7 +27,7 @@ function sanitizeFilename(original: string | undefined): string {
 }
 
 router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), upload.single('image'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ message: 'Зураг сонгоно уу.' })
+  if (!req.file) return res.status(400).json({ message: 'Upload request-д зургийн файл ирсэнгүй. Зургаа дахин сонгоно уу.' })
   const safeName = sanitizeFilename(req.file.originalname)
   if (dangerousExtension.test(safeName.toLowerCase())) return res.status(400).json({ message: 'Энэ файлын нэр зөвшөөрөгдөхгүй байна.' })
   if (req.file.size > maximumBytes || req.file.size < minimumBytes) return res.status(400).json({ message: 'Зургийн хэмжээ хэт том эсвэл хэт бага байна.' })

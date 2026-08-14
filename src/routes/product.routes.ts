@@ -97,7 +97,7 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
       await applyStockMovement(tx, { tenantId, warehouseId: warehouse.id, productId: created.id, type: StockMovementType.ADJUSTMENT, quantity: data.stock, reference: `PRODUCT:${created.id}`, reason: 'Бүтээгдэхүүний эхний үлдэгдэл', createdBy: req.user!.id })
     }
     return created
-  })
+  }, { maxWait: 10000, timeout: 30000 })
   await cacheDelete('products:*')
   res.status(201).json(product)
 })
