@@ -47,7 +47,7 @@ router.get('/platform/health', async (req, res) => {
 })
 router.get('/platform/usage', async (req, res) => {
   if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
-  const tenants = await prisma.tenant.findMany({ orderBy: { createdAt: 'desc' } }); res.json(await Promise.all(tenants.map(async (tenant) => ({ tenant, usage: { users: await prisma.user.count({ where: { tenantId: tenant.id } }), products: await prisma.product.count({ where: { tenantId: tenant.id } }), warehouses: await prisma.warehouse.count({ where: { tenantId: tenant.id } }) }, limits: planRules[(tenant.subscription in planRules ? tenant.subscription : 'MVP') as keyof typeof planRules] }))))
+  const tenants = await prisma.tenant.findMany({ orderBy: { createdAt: 'desc' } }); res.json(await Promise.all(tenants.map(async (tenant) => ({ tenant, usage: { users: await prisma.user.count({ where: { tenantId: tenant.id, role: { not: Role.CUSTOMER } } }), products: await prisma.product.count({ where: { tenantId: tenant.id } }), warehouses: await prisma.warehouse.count({ where: { tenantId: tenant.id } }) }, limits: planRules[(tenant.subscription in planRules ? tenant.subscription : 'MVP') as keyof typeof planRules] }))))
 })
 router.post('/platform/tenants/:id/domain/request', async (req, res) => {
   if (!await assertPlatformAdmin(req.user!.id)) return res.status(403).json({ message: 'Super Admin эрх шаардлагатай.' })
