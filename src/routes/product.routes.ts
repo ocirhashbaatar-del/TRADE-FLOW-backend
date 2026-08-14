@@ -90,8 +90,8 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
     if (!category) throw Object.assign(new Error('Ангилал буруу.'), { status: 400 })
     const duplicate = await tx.product.findFirst({ where: { tenantId, sku: data.sku } })
     if (duplicate) throw Object.assign(new Error('Энэ барааны код бүртгэлтэй байна.'), { status: 409 })
-    const warehouse = await tx.warehouse.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: 'asc' } })
-    if (data.stock > 0 && !warehouse) throw Object.assign(new Error('Эхний үлдэгдэл бүртгэхийн өмнө агуулах үүсгэнэ үү.'), { status: 409 })
+    let warehouse = await tx.warehouse.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: 'asc' } })
+    if (data.stock > 0 && !warehouse) warehouse = await tx.warehouse.create({ data: { tenantId, code: 'MAIN', name: 'Үндсэн агуулах', type: 'WAREHOUSE' } })
     const created = await tx.product.create({ data: { ...data, tenantId, vendorId: data.vendorId ?? req.user!.id } })
     if (warehouse && data.stock > 0) {
       await applyStockMovement(tx, { tenantId, warehouseId: warehouse.id, productId: created.id, type: StockMovementType.ADJUSTMENT, quantity: data.stock, reference: `PRODUCT:${created.id}`, reason: 'Бүтээгдэхүүний эхний үлдэгдэл', createdBy: req.user!.id })

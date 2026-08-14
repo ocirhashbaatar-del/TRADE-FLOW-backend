@@ -90,17 +90,38 @@ router.post('/accept-invite', async (req, res) => {
   const input = z.object({ token: z.string().min(32), password: z.string().min(8) }).parse(req.body)
   const tokenHash = hashToken(input.token)
   const passwordHash = await bcrypt.hash(input.password, 12)
-  const user = await prisma.$transaction(async (tx) => {
+  const accept = () => prisma.$transaction(async (tx) => {
     const invitation = await tx.staffInvitation.findUnique({ where: { tokenHash } })
-    if (!invitation || invitation.acceptedAt || invitation.expiresAt < new Date()) throw Object.assign(new Error('Урилга хүчингүй эсвэл хугацаа дууссан байна.'), { status: 400 })
+    if (!invitation || invitation.expiresAt < new Date()) throw Object.assign(new Error('Урилга хүчингүй эсвэл хугацаа дууссан байна.'), { status: 400 })
     const tenant = await tx.tenant.findUnique({ where: { id: invitation.tenantId } })
     if (!tenant?.active) throw Object.assign(new Error('Урилгын байгууллага идэвхгүй байна.'), { status: 409 })
     const existingUser = await tx.user.findUnique({ where: { email: invitation.email } })
-    if (existingUser) throw Object.assign(new Error('Энэ email-ээр хэрэглэгч аль хэдийн бүртгэлтэй байна. Нэвтрэх эсвэл админтай холбогдоно уу.'), { status: 409 })
+    if (existingUser) {
+      const recentAcceptance = invitation.acceptedAt && invitation.acceptedAt.getTime() > Date.now() - 2 * 60 * 1000
+      const sameAccount = existingUser.tenantId === tenant.id && Boolean(existingUser.passwordHash) && await bcrypt.compare(input.password, existingUser.passwordHash!)
+      if (recentAcceptance && sameAccount) return existingUser
+      throw Object.assign(new Error('Энэ email-ээр хэрэглэгч аль хэдийн бүртгэлтэй байна. Нэвтрэх эсвэл админтай холбогдоно уу.'), { status: 409 })
+    }
+    if (invitation.acceptedAt) throw Object.assign(new Error('Урилга аль хэдийн ашиглагдсан байна.'), { status: 400 })
     const created = await tx.user.create({ data: { name: invitation.name, email: invitation.email, role: invitation.role, tenantId: tenant.id, tenant: tenant.name, passwordHash, emailVerified: new Date() } })
     await tx.staffInvitation.update({ where: { id: invitation.id }, data: { acceptedAt: new Date() } })
     return created
   })
+  let user
+  try {
+    user = await accept()
+  } catch (error: unknown) {
+    // Two mobile taps can race before React disables the button. If the other
+    // request completed the same invitation with the same password, treat this
+    // request as the same successful operation instead of returning 409/P2002.
+    if ((error as { code?: string })?.code !== 'P2002') throw error
+    const invitation = await prisma.staffInvitation.findUnique({ where: { tokenHash } })
+    const existingUser = invitation ? await prisma.user.findUnique({ where: { email: invitation.email } }) : null
+    const recentAcceptance = invitation?.acceptedAt && invitation.acceptedAt.getTime() > Date.now() - 2 * 60 * 1000
+    const sameAccount = recentAcceptance && existingUser?.tenantId === invitation!.tenantId && Boolean(existingUser.passwordHash) && await bcrypt.compare(input.password, existingUser.passwordHash!)
+    if (!sameAccount || !existingUser) throw error
+    user = existingUser
+  }
   const tokens = await issueTokens(user)
   res.json({ user: publicUser(user), token: tokens.accessToken, ...tokens })
 })
