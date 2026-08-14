@@ -5,5 +5,5 @@ export async function assertSubscriptionCapacity(tx: Prisma.TransactionClient, t
   // Plan user limits are staff seats. Storefront customers and temporary guest
   // accounts must not consume an organization's internal staff capacity.
   const used = resource === 'users' ? await tx.user.count({ where: { tenantId, role: { not: 'CUSTOMER' } } }) : resource === 'products' ? await tx.product.count({ where: { tenantId } }) : await tx.warehouse.count({ where: { tenantId } })
-  if (used >= plan[resource]) throw Object.assign(new Error(`${tenant.subscription} багцын ${resource} хязгаар (${plan[resource]}) хүрсэн.`), { status: 402 })
+  if (used >= plan[resource]) throw Object.assign(new Error(`${tenant.subscription} багцын ${resource === 'users' ? 'ажилтны' : resource} хязгаар (${plan[resource]}) хүрсэн. Багцаа ахиулах эсвэл ашиглагдаж буй эрхийг суллана уу.`), { status: 402 })
 }
