@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import multer from 'multer'
 import sharp, { type Metadata } from 'sharp'
 import { Role } from '@prisma/client'
@@ -25,15 +25,19 @@ function sanitizeFilename(original: string | undefined): string {
   return clean || 'image'
 }
 
-router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), upload.single('image'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ message: 'Upload request-д зургийн файл ирсэнгүй. Зургаа дахин сонгоно уу.' })
-  const safeName = sanitizeFilename(req.file.originalname)
+router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR), express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: maximumBytes }), upload.single('image'), async (req, res) => {
+  const rawBuffer = Buffer.isBuffer(req.body) ? req.body : undefined
+  const headerName = typeof req.headers['x-file-name'] === 'string' ? req.headers['x-file-name'] : undefined
+  const decodedName = headerName ? (() => { try { return decodeURIComponent(headerName) } catch { return headerName } })() : undefined
+  const file = req.file ?? (rawBuffer?.length ? { buffer: rawBuffer, size: rawBuffer.length, mimetype: req.headers['content-type']?.split(';')[0] ?? '', originalname: decodedName ?? 'image' } : undefined)
+  if (!file) return res.status(400).json({ message: 'Upload request-д зургийн файл ирсэнгүй. Зургаа дахин сонгоно уу.' })
+  const safeName = sanitizeFilename(file.originalname)
   if (dangerousExtension.test(safeName.toLowerCase())) return res.status(400).json({ message: 'Энэ файлын нэр зөвшөөрөгдөхгүй байна.' })
-  if (req.file.size > maximumBytes || req.file.size === 0) return res.status(400).json({ message: 'Зургийн файл хоосон эсвэл 5MB-аас том байна.' })
-  if (opaqueTypes.has(req.file.mimetype) || !allowedMimeTypes.has(req.file.mimetype)) return res.status(400).json({ message: 'Зөвхөн JPG, JPEG, PNG эсвэл WEBP зураг оруулна уу.' })
+  if (file.size > maximumBytes || file.size === 0) return res.status(400).json({ message: 'Зургийн файл хоосон эсвэл 5MB-аас том байна.' })
+  if (opaqueTypes.has(file.mimetype) || !allowedMimeTypes.has(file.mimetype)) return res.status(400).json({ message: 'Зөвхөн JPG, JPEG, PNG эсвэл WEBP зураг оруулна уу.' })
   let metadata: Metadata
   try {
-    metadata = await sharp(req.file.buffer).metadata()
+    metadata = await sharp(file.buffer).metadata()
   } catch {
     return res.status(400).json({ message: 'Зургийн файл гэмтсэн эсвэл дэмжигдэхгүй форматтай байна.' })
   }
@@ -51,7 +55,7 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
       if (error || !uploaded) return reject(error ?? new Error('Cloudinary upload failed'))
       resolve({ secure_url: uploaded.secure_url, public_id: uploaded.public_id, bytes: uploaded.bytes, width: uploaded.width, height: uploaded.height, format: uploaded.format })
     })
-    stream.end(req.file!.buffer)
+    stream.end(file.buffer)
   })
 
   try {
