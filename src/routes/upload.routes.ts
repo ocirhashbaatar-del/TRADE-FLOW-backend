@@ -7,7 +7,6 @@ import { cloudinary } from '../lib/services.js'
 import { prisma } from '../lib/prisma.js'
 
 const router = Router()
-const minimumBytes = 100 * 1024
 const maximumBytes = 5 * 1024 * 1024
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
 const allowedFormats = new Set(['jpeg', 'png', 'webp'])
@@ -30,10 +29,8 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
   if (!req.file) return res.status(400).json({ message: 'Upload request-д зургийн файл ирсэнгүй. Зургаа дахин сонгоно уу.' })
   const safeName = sanitizeFilename(req.file.originalname)
   if (dangerousExtension.test(safeName.toLowerCase())) return res.status(400).json({ message: 'Энэ файлын нэр зөвшөөрөгдөхгүй байна.' })
-  if (req.file.size > maximumBytes || req.file.size < minimumBytes) return res.status(400).json({ message: 'Зургийн хэмжээ хэт том эсвэл хэт бага байна.' })
+  if (req.file.size > maximumBytes || req.file.size === 0) return res.status(400).json({ message: 'Зургийн файл хоосон эсвэл 5MB-аас том байна.' })
   if (opaqueTypes.has(req.file.mimetype) || !allowedMimeTypes.has(req.file.mimetype)) return res.status(400).json({ message: 'Зөвхөн JPG, JPEG, PNG эсвэл WEBP зураг оруулна уу.' })
-  if (req.file.size < minimumBytes) return res.status(400).json({ message: 'Зургийн чанар хэт бага байна, өөр зураг сонгоно уу.' })
-
   let metadata: Metadata
   try {
     metadata = await sharp(req.file.buffer).metadata()
@@ -41,11 +38,12 @@ router.post('/', authenticate, authorize(Role.ADMIN, Role.MANAGER, Role.VENDOR),
     return res.status(400).json({ message: 'Зургийн файл гэмтсэн эсвэл дэмжигдэхгүй форматтай байна.' })
   }
   if (!metadata.format || !allowedFormats.has(metadata.format)) return res.status(400).json({ message: 'Зөвхөн JPG, JPEG, PNG эсвэл WEBP зураг оруулна уу.' })
-  if (!metadata.width || metadata.width < 400) return res.status(400).json({ message: 'Зургийн чанар хэт бага байна, өөр зураг сонгоно уу.' })
+  if (!metadata.width || !metadata.height) return res.status(400).json({ message: 'Зургийн өргөн, өндөр тодорхойгүй байна.' })
 
   const transformation: Array<Record<string, string | number>> = [
     { effect: 'improve' },
-    ...(metadata.width < 800 ? [{ width: 800, crop: 'scale' }] : []),
+    ...(metadata.width < 1200 ? [{ width: 1200, crop: 'scale' }] : []),
+    { dpr: 'auto' },
     { quality: 'auto:best', fetch_format: 'auto' },
   ]
   const result = await new Promise<{ secure_url: string; public_id: string; bytes: number; width: number; height: number; format: string }>((resolve, reject) => {
